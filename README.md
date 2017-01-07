@@ -80,7 +80,10 @@ This program is designed to work with various cloud providers in a generic way, 
 
 - There is no Google Photos API; it uses a zombied version of the [Picasa Web Albums API](https://developers.google.com/picasa-web/docs/2.0/developers_guide_protocol) which is somewhat deprecated. But it still works for now, and one advantage is that you don't have to mirror your Google Photos in Google Drive for this program to work.
 
-- Some users [have reported](https://code.google.com/p/gdata-issues/issues/detail?id=7004) that a [maximum of 10,000 photos can be downloaded](https://github.com/camlistore/camlistore/issues/874) per album. It is still unclear why this is; even Google employees are hitting this. Google Photos puts all your "instant upload" (auto backup) photos into a single album called "Auto Backup". So if you take most of your photos on your phone and they get uploaded to Google Photos, you may hit this limit and there is no way to get photos older than the most recent 10k unless you put them into albums you create.
+- Some users [have reported](https://code.google.com/p/gdata-issues/issues/detail?id=7004) that a [maximum of ~10,000 photos can be downloaded](https://github.com/camlistore/camlistore/issues/874) per album. It is still unclear why this is; even Google employees are hitting this. Google Photos puts all your "instant upload" (auto backup) photos into a single album called "Auto Backup". So if you take most of your photos on your phone and they get uploaded to Google Photos, you may hit this limit and there is no way to get photos older than the most recent 10k unless you put them into albums you create.
 
 - Photos are retrieved approximately in order from the most recent to the oldest as they appear in your photo stream. Downloads will happen concurrently in several threads to speed things up.
 
+- Media may be available in several formats and sizes for a single item. Photobak will try to get the largest .mp4 video file, if available. If not, it will get the largest video even if it is a .flv file. If there is no video available, it tries the highest-resolution _anything_ it can find.
+
+- Filenames for albums and photos are sanitized to remove special characters that sometimes appear but may not play nicely with the file system. For example, "5:5.jpg" becomes "55.jpg".
