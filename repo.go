@@ -309,7 +309,7 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 			if err != nil {
 				return fmt.Errorf("hashing file: %v", err)
 			}
-			log.Printf("[INFO] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
+			log.Printf("[ERROR] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
 
 			it := item{
 				Item:     receivedItem,
@@ -433,8 +433,6 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			// file in this coll so the owner can find
 			// it later if they want to, and we don't
 			// duplicate the file on disk.
-			log.Printf("[INFO] %s is currently being downloaded to another location", it.ItemName())
-
 			err := r.writeToMediaListFile(pa, coll, dlPath)
 			if err != nil {
 				return err
@@ -510,12 +508,8 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		return fmt.Errorf("downloading %s: %v", it.ItemName(), err)
 	}
 
-	setting, err := r.getSettingFromEXIF(x)
-	if err != nil {
-		// TODO: I don't really care about this error...
-		// TODO: Either way... improve logging.
-		log.Println(err)
-	}
+	// I don't care about the error here. Might just not have EXIF data.
+	setting, _ := r.getSettingFromEXIF(x)
 
 	meta := ItemMeta{Setting: setting}
 	if saveEverything {

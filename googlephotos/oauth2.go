@@ -128,7 +128,7 @@ func getNewToken(conf *oauth2.Config) (*oauth2.Token, error) {
 
 	err = openBrowser(url)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	select {
