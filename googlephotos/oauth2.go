@@ -52,6 +52,8 @@ func getToken(_ string) ([]byte, error) {
 	return tokenJSON, nil
 }
 
+// newClient returns an authenticated Client given the
+// token data.
 func newClient(tokenData []byte) (photobak.Client, error) {
 	oauthClient, err := newOAuth2Client(tokenData)
 	if err != nil {
@@ -60,6 +62,8 @@ func newClient(tokenData []byte) (photobak.Client, error) {
 	return &Client{HTTPClient: oauthClient}, nil
 }
 
+// newOAuth2Client gives a new authenticated http.Client
+// given the token data.
 func newOAuth2Client(tokenData []byte) (*http.Client, error) {
 	var token *oauth2.Token
 	err := json.Unmarshal(tokenData, &token)
@@ -69,10 +73,12 @@ func newOAuth2Client(tokenData []byte) (*http.Client, error) {
 	return oauth2Config.Client(oauth2.NoContext, token), nil
 }
 
+// getNewToken will get a new OAuth2 token from the user
+// by opening the browser for them.
 func getNewToken(conf *oauth2.Config) (*oauth2.Token, error) {
 	log.Println("Getting new OAuth2 token")
 
-	cbUrl, err := url.Parse(conf.RedirectURL)
+	cbURL, err := url.Parse(conf.RedirectURL)
 	if err != nil {
 		return nil, fmt.Errorf("bad redirect URL: %v", err)
 	}
@@ -93,7 +99,7 @@ func getNewToken(conf *oauth2.Config) (*oauth2.Token, error) {
 			state := r.FormValue("state")
 			code := r.FormValue("code")
 
-			if r.Method != "GET" || r.URL.Path != cbUrl.Path || state == "" || code == "" {
+			if r.Method != "GET" || r.URL.Path != cbURL.Path || state == "" || code == "" {
 				http.Error(w, "This endpoint is for OAuth2 callbacks only", http.StatusNotFound)
 				return
 			}
@@ -133,6 +139,7 @@ func getNewToken(conf *oauth2.Config) (*oauth2.Token, error) {
 	}
 }
 
+// openBrowser opens the browser to url.
 func openBrowser(url string) error {
 	osCommand := map[string][]string{
 		"darwin":  []string{"open"},

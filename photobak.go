@@ -78,12 +78,21 @@ type Item interface {
 	ItemCaption() string
 }
 
+// collection wraps a Collection with
+// vital name+path information used
+// for creating/updating one.
 type collection struct {
 	Collection
 	dirName string
 	dirPath string
 }
 
+// item wraps an Item with
+// vital name+path information used
+// for creating/updating one. isNew
+// is set to true if the item
+// is new and should not overwrite
+// an existing file on disk.
 type item struct {
 	Item
 	fileName string
@@ -103,6 +112,8 @@ type DBCollection struct {
 	Meta    CollectionMeta
 }
 
+// CollectionMeta is extra information
+// about a collection.
 type CollectionMeta struct {
 	API Collection // everything given by remote/API; only stored if requested
 }
@@ -144,6 +155,7 @@ type Setting struct {
 
 var providers = make(map[string]Provider)
 
+// RegisterProvider adds p to the list of providers.
 func RegisterProvider(p Provider) {
 	p.Name = strings.ToLower(p.Name)
 	providers[p.Name] = p
@@ -154,8 +166,8 @@ type providerAccount struct {
 	username string // or email address
 }
 
-func (a providerAccount) key() []byte {
-	return []byte(fmt.Sprintf("%s:%s", a.provider.Name, a.username))
+func (pa providerAccount) key() []byte {
+	return []byte(fmt.Sprintf("%s:%s", pa.provider.Name, pa.username))
 }
 
 func (pa providerAccount) accountPath() string {
@@ -165,10 +177,12 @@ func (pa providerAccount) accountPath() string {
 	return filepath.Join(pa.provider.Name, username)
 }
 
-func (a providerAccount) String() string {
-	return string(a.key())
+func (pa providerAccount) String() string {
+	return string(pa.key())
 }
 
+// getAccounts gets a list of all the accounts
+//
 func getAccounts() []providerAccount {
 	var accounts []providerAccount
 	for _, p := range providers {

@@ -1,3 +1,5 @@
+// Package googlephotos implements Google Photos access for photobak using the
+// crippled Picasa Web Albums API.
 package googlephotos
 
 import (
@@ -50,6 +52,7 @@ func (c *Client) Name() string {
 	return "googlephotos"
 }
 
+// ListCollections lists the albums belonging to the user.
 func (c *Client) ListCollections() ([]photobak.Collection, error) {
 	// the picasa web album API docs say the default "kind" parameter
 	// value is "album" which is what we want, so we don't bother to
@@ -63,7 +66,6 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 	if err != nil {
 		return nil, err
 	}
-	// fmt.Println("ALBUM:", string(data))
 
 	var results Atom
 	err = xml.Unmarshal(data, &results)
@@ -80,12 +82,24 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 	return albums, nil
 }
 
+// ListCollectionItems lists all the items in the collection given by col and puts
+// them down the itemChan. This method uses an API call to get photos for the
+// default (authenticated) user and to get a list of all photos in the album. This
+// provides different (and more) output than the API call which just gets a list of
+// the users n-most-recent photos from their stream (which is limited to just 1000),
+// and that API call doesn't include information like EXIF data. In other words,
+// we're using the best available API call we have here.
+//
+// Note that, due to a bug in the Picasa Web Albums API, there is a limit as to how
+// many photos can be retrieved on very large albums. See the README for more info.
 func (c *Client) ListCollectionItems(col photobak.Collection, itemChan chan photobak.Item) error {
 	defer close(itemChan)
 	url := "https://picasaweb.google.com/data/feed/api/user/default/albumid/" + col.CollectionID()
 	return c.listAllPhotos(url, itemChan)
 }
 
+// listAllPhotos gets all photos in the album designated by the baseURL and pipes
+// them down itemChan.
 func (c *Client) listAllPhotos(baseURL string, itemChan chan photobak.Item) error {
 	var page Atom
 	var err error
@@ -119,6 +133,7 @@ func (c *Client) listAllPhotos(baseURL string, itemChan chan photobak.Item) erro
 	return nil
 }
 
+// DownloadItemInto downloads item into w.
 func (c *Client) DownloadItemInto(item photobak.Item, w io.Writer) error {
 	gpItem, ok := item.(Entry)
 	if !ok {
@@ -194,56 +209,10 @@ func getBestDownloadURL(e Entry) (string, error) {
 	return bestURL, nil
 }
 
-// func (c *Client) ListRecentPhotos(max int) ([]Entry, error) {
-// 	// Maximum start-index: 1000.
-// 	// For some reason, this API endpoint ONLY works if
-// 	// max-results is specified, and since we cannot get
-// 	// more than 1000 entries, that is what we default to.
-// 	// This endpoint does not expose EXIF data and the URLs
-// 	// provided do not include GPS data in the embedded EXIF
-// 	// data. Seems this endpoint is intended for use by
-//	// public consumption as a summary...
-// 	if max <= 0 || max > 1000 {
-// 		max = 1000
-// 	}
-// 	return c.listAllPhotos("https://picasaweb.google.com/data/feed/api/user/default?kind=photo", max)
-// }
-
-// ListAlbums returns a list of the authenticated user's albums
-// func (c *Client) ListAlbums(max int) ([]Entry, error) {
-// 	url := "https://picasaweb.google.com/data/feed/api/user/default"
-// 	if max > 0 {
-// 		url += fmt.Sprintf("?max-results=%d", max)
-// 	}
-// 	// default "kind" is "album", according to the docs...
-// 	data, err := c.getFeed(url)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	var results Atom
-// 	err = xml.Unmarshal(data, &results)
-
-// 	// sanitize album names
-// 	for i := 0; i < len(results.Entries); i++ {
-// 		fmt.Println("ALBUM TITLE BEFORE:", results.Entries[i].Title)
-// 		results.Entries[i].Title = sanitizeFilename(results.Entries[i].Title)
-// 		fmt.Println("ALBUM TITLE AFTER: ", results.Entries[i].Title)
-// 	}
-
-// 	return results.Entries, err
-// }
-
-// (Note: This call returns more info about each photo, including
-// some exif data, and the content URLs to download the photos
-// // include all exif data including GPS coordinates.)
-// func (c *Client) ListAlbumPhotos(album Entry, max int) ([]Entry, error) {
-// 	// Maximum start-index: ~10000.
-// 	// https://code.google.com/p/gdata-issues/issues/detail?id=7004
-// 	// https://github.com/camlistore/camlistore/issues/874
-// 	return c.listAllPhotos("https://picasaweb.google.com/data/feed/api/user/default/albumid/"+album.ID, max)
-// }
-
+// listPhotosPage lists photos from a "page" which consists of a single API call.
+// To get all the photos in an album, you will need to call this until there are
+// no more results. If max is > 0, no more than that many results will be returned
+// per page.
 func (c *Client) listPhotosPage(baseURL string, start, max int) (Atom, error) {
 	url, err := url.Parse(baseURL)
 	if err != nil {
@@ -261,7 +230,6 @@ func (c *Client) listPhotosPage(baseURL string, start, max int) (Atom, error) {
 	if err != nil {
 		return Atom{}, err
 	}
-	//fmt.Println("ITEMS:", string(data))
 
 	var results Atom
 	err = xml.Unmarshal(data, &results)
@@ -271,10 +239,6 @@ func (c *Client) listPhotosPage(baseURL string, start, max int) (Atom, error) {
 		results.Entries[i].Title = path.Base(results.Entries[i].Title) // https://github.com/tgulacsi/picago/pull/6
 		results.Entries[i].Title = sanitizeFilename(results.Entries[i].Title)
 	}
-	// TODO: Should we give a default file extension of .jpg
-	// for images (or .mp4 for videos) that don't have one?
-	// or should we be smart about detecting the file type, or none
-	// of the above...
 
 	return results, err
 }

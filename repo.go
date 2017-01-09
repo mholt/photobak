@@ -31,9 +31,6 @@ type Repository struct {
 	// of the path should be empty if it exists.
 	path string
 
-	// whether to save all API-given metadata in DB
-	// saveEverything bool
-
 	// the database to operate on; should be opened.
 	db *boltDB
 
@@ -267,8 +264,7 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 	}
 
 	if loadedItem == nil {
-		// we don't have it; download and save item.
-		fmt.Println("We don't have it")
+		// we don't have it yet; download and save item.
 
 		it := item{
 			Item:     receivedItem,
@@ -283,7 +279,7 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 			return fmt.Errorf("downloading and saving new item: %v", err)
 		}
 	} else {
-		fmt.Println("We already have it in the DB")
+		// we already have this item in the DB
 
 		// check ETag
 		// TODO: This will be different for the same photo if it is in a different album :(
@@ -362,7 +358,6 @@ func (r *Repository) reserveUniqueFilename(dir, targetName string, isDir bool) (
 	finalPath := r.fullPath(filepath.Join(dir, candidate))
 
 	if isDir {
-		log.Println("RESERVING DIR:", finalPath)
 		err := os.MkdirAll(finalPath, 0700)
 		if err != nil {
 			return candidate, err
@@ -370,7 +365,6 @@ func (r *Repository) reserveUniqueFilename(dir, targetName string, isDir bool) (
 	} else {
 		f, err := os.Create(finalPath)
 		if err != nil {
-			log.Println("ERROR HERE!", dir, candidate)
 			return candidate, err
 		}
 		f.Close()
@@ -477,7 +471,6 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	if err != nil {
 		return fmt.Errorf("creating folder for collection '%s': %v", coll.CollectionName(), err)
 	}
-	fmt.Println("Made collection folder, downloading item...")
 
 	outFile, err := os.Create(r.fullPath(it.filePath))
 	if err != nil {
@@ -485,13 +478,9 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	}
 	defer outFile.Close()
 
-	fmt.Println("Output file opened")
-
 	h := sha256.New()
 	pr, pw := io.Pipe()
 	mw := io.MultiWriter(outFile, h, dishonestWriter{pw})
-
-	fmt.Println("Created streams")
 
 	var x *exif.Exif
 	go func() {
@@ -516,13 +505,10 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		pr.Close()
 	}()
 
-	fmt.Println("Downloading...")
-
 	err = client.DownloadItemInto(it.Item, mw)
 	if err != nil {
 		return fmt.Errorf("downloading %s: %v", it.ItemName(), err)
 	}
-	fmt.Println("Download finished; saving to DB.")
 
 	setting, err := r.getSettingFromEXIF(x)
 	if err != nil {
@@ -555,8 +541,6 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	if err != nil {
 		return fmt.Errorf("saving item '%s' to database: %v", it.fileName, err)
 	}
-
-	fmt.Println("Save to DB complete")
 
 	return nil
 }
@@ -645,10 +629,6 @@ func (r *Repository) getSettingFromEXIF(x *exif.Exif) (*Setting, error) {
 // in the media list file.
 func (r *Repository) localCollectionHasItem(pa providerAccount, coll collection, localItem *DBItem) (bool, error) {
 	// check for item on disk first
-	// TODO: If file has the same name, but is actually a different file,
-	// this could erroneously return true when it shouldn't. To be 100%
-	// correct on this, we would need to keep an index of all item IDs
-	// that are saved in each collection.
 	if r.fileExists(localItem.FilePath) {
 		return true, nil
 	}

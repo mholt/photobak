@@ -7,6 +7,7 @@ import "time"
 // https://github.com/tgulacsi/picago
 // then enhanced/changed a bit for this use case.
 
+// Atom is an entire feed result from the API.
 type Atom struct {
 	ID           string    `xml:"id"`
 	Name         string    `xml:"name"`
@@ -23,10 +24,13 @@ type Atom struct {
 	Entries      []Entry   `xml:"entry"`
 }
 
+// Tags is item tags, like unique ID.
 type Tags struct {
 	ImageUniqueID string `xml:"imageUniqueID"`
 }
 
+// Entry is an entry in the feed results. Can be
+// used for both albums and photos.
 type Entry struct {
 	ETag          string         `xml:"etag,attr"`
 	EntryID       string         `xml:"http://www.w3.org/2005/Atom id"`
@@ -52,29 +56,37 @@ type Entry struct {
 	Point         string         `xml:"where>Point>pos"`
 }
 
-func (e Entry) CollectionID() string   { return e.ID }
+// CollectionID returns the collection ID.
+func (e Entry) CollectionID() string { return e.ID }
+
+// CollectionName returns the collection name.
 func (e Entry) CollectionName() string { return e.Title }
 
-// TODO: Yikes, the ID may be too unique. Same photo has different IDs :(
-// But <gphoto:timestamp> seems unique, as does exif>uniquePhotoID
-// -- we may need to try various combinations until we find non-empty
-// values that we are confident will correctly ID a photo... :(
-// fall back to e.ID if all else fails.
-// For videos, tags>imageUniqueID should do. I think.
+// ItemID returns the item ID. Unfortunately, Google's "id" field
+// is sometimes too unique: the same photo can have different IDs
+// if in different albums. So we get the unique ID from exif data
+// of the entry first, then fall back to the Google-given
+// ID+timestamp, then just the ID. It's the best we can do.
 func (e Entry) ItemID() string {
 	if e.Exif != nil && e.Exif.UID != "" {
 		return e.Exif.UID
 	}
-	// TODO: Fall back to timestamp?
-	// if e.Timestamp != "" {
-	// 	return e.Timestamp
-	// }
+	if e.Timestamp != "" {
+		return e.ID + "-" + e.Timestamp
+	}
 	return e.ID // NOTE! Same photo may have different IDs... :(
 }
-func (e Entry) ItemName() string    { return e.Title }
-func (e Entry) ItemETag() string    { return e.ETag }
+
+// ItemName returns the item's name (file name).
+func (e Entry) ItemName() string { return e.Title }
+
+// ItemETag returns the item's ETag.
+func (e Entry) ItemETag() string { return e.ETag }
+
+// ItemCaption returns the item's summary/description.
 func (e Entry) ItemCaption() string { return e.Summary }
 
+// OriginalVideo is info about the originally-uploaded video.
 type OriginalVideo struct {
 	AudioCodec   string `xml:" audioCodec,attr"`
 	Channels     string `xml:" channels,attr"`
@@ -87,6 +99,7 @@ type OriginalVideo struct {
 	Width        string `xml:" width,attr"`
 }
 
+// EntryExif is exif data given in the entry.
 type EntryExif struct {
 	FStop       float32 `xml:"fstop"`
 	Make        string  `xml:"make"`
@@ -99,12 +112,14 @@ type EntryExif struct {
 	UID         string  `xml:"imageUniqueID"`
 }
 
+// Link information.
 type Link struct {
 	Rel  string `xml:"rel,attr"`
 	Type string `xml:"type,attr"`
 	URL  string `xml:"href,attr"`
 }
 
+// EntryMedia stores the list of media for the entry.
 type EntryMedia struct {
 	Title       string         `xml:"http://search.yahoo.com/mrss title"`
 	Description string         `xml:"description"`
@@ -114,6 +129,7 @@ type EntryMedia struct {
 	Thumbnail   []MediaContent `xml:"thumbnail"`
 }
 
+// MediaContent is a media content item.
 type MediaContent struct {
 	URL    string `xml:"url,attr"`
 	Type   string `xml:"type,attr"`
@@ -122,11 +138,13 @@ type MediaContent struct {
 	Medium string `xml:"medium,attr"` // "image" or "video"
 }
 
+// EntryContent is a content item.
 type EntryContent struct {
 	URL  string `xml:"src,attr"`
 	Type string `xml:"type,attr"`
 }
 
+// Author information.
 type Author struct {
 	Name string `xml:"name"`
 	URI  string `xml:"uri"`
