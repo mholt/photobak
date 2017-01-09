@@ -103,5 +103,5 @@ This program is designed to work with various cloud providers in a generic way, 
 
 I have an Android phone, and I love using Google Photos. It's amazing: free, unlimited photo storage that is automatically indexed and organized and searchable. When I take a picture on my phone, it goes straight to the cloud, and then my phone frees up space. This is all automatic, and it's great.
 
-The problem is, what if I lose access to my Google account? I have no local copy of my memories. They skipped my computer and went straight to the cloud. This program was designed for 
+The problem is, what if I lose access to my Google account? I have no local copy of my memories. They skipped my computer and went straight to the cloud. This program is designed for users who are too busy to manually download all their photos on a regular basis but still want a local copy of them, just in case.
 
