@@ -9,18 +9,10 @@ import (
 	"sync"
 )
 
-// StoreAllAndSync is like StoreAll, but after storing new items,
-// items that are saved locally that have been deleted from remote
-// will be deleted locally, and collections that no longer have
-// items in them will be updated locally to reflect that.
-func (r *Repository) StoreAllAndSync(saveEverything bool) error {
-	return r.storeAll(saveEverything, true)
-}
-
-// Sync will update the local repository to match deletions
+// Prune will update the local repository to match deletions
 // and removals from the remote. It does not perform additive
 // operations.
-func (r *Repository) Sync() error {
+func (r *Repository) Prune() error {
 	accounts, err := r.authorizedAccounts()
 	if err != nil {
 		return err

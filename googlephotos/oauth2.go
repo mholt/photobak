@@ -25,13 +25,17 @@ func init() {
 	oauth2Config.ClientSecret = os.Getenv("GOOGLEPHOTOS_CLIENT_SECRET")
 }
 
-// getToken gets an OAuth2 token. (The username parameter
-// is not used, but it is here to satisfy the function
-// signature in photobak.Provider.)
-func getToken(_ string) ([]byte, error) {
+// getToken gets an OAuth2 token from the user.
+func getToken(username string) ([]byte, error) {
 	if oauth2Config.ClientID == "" || oauth2Config.ClientSecret == "" {
 		return nil, fmt.Errorf("missing client ID and/or secret env variables; create OAuth 2.0 client ID at console.developers.google.com")
 	}
+
+	fmt.Println("Photobak needs authorization to access the photos and")
+	fmt.Printf("videos for %s. To obtain this, a browser\n", username)
+	fmt.Println("tab will be opened where you can grant access.")
+	fmt.Println("Press [ENTER] to continue.")
+	fmt.Scanln()
 
 	token, err := getNewToken(oauth2Config)
 	if err != nil {

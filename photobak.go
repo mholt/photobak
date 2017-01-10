@@ -143,7 +143,7 @@ type DBItem struct {
 }
 
 // ItemMeta holds extra information about an item.
-// Fields on this struct may not be set.
+// Fields on this struct might not be set.
 type ItemMeta struct {
 	API     Item     // everything given by remote/API; only stored if requested
 	Setting *Setting // obtained directly from embedded EXIF
@@ -151,7 +151,7 @@ type ItemMeta struct {
 }
 
 // Setting is a place and time. This information
-// may be extracted from EXIF data contained in the
+// might be extracted from EXIF data contained in the
 // actual file if it is not available in the API
 // response.
 type Setting struct {

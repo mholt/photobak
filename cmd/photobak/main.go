@@ -21,7 +21,8 @@ var (
 	logFile        = "stderr"
 	concurrency    = 5
 	every          string
-	sync           bool
+	prune          bool
+	authOnly       bool
 )
 
 func init() {
@@ -30,15 +31,12 @@ func init() {
 	flag.StringVar(&logFile, "log", logFile, "Write logs to a file, stdout, or stderr")
 	flag.StringVar(&every, "every", every, "How often to run this command, blocking indefinitely")
 	flag.IntVar(&concurrency, "concurrency", concurrency, "How many downloads to do in parallel")
-	flag.BoolVar(&sync, "sync", sync, "Download new items then perform a destructive sync")
+	flag.BoolVar(&prune, "prune", prune, "Download new items, then prune removed photos and albums")
+	flag.BoolVar(&authOnly, "authonly", authOnly, "Obtain authorizations only; do not perform backups")
 }
 
 func main() {
 	flag.Parse()
-
-	if concurrency < 1 {
-		log.Fatal("concurrency must be at least 1")
-	}
 
 	switch logFile {
 	case "stdout":
@@ -54,6 +52,19 @@ func main() {
 			MaxAge:     90,
 			MaxBackups: 10,
 		})
+	}
+
+	if concurrency < 1 {
+		log.Fatal("concurrency must be at least 1")
+	}
+
+	if authOnly {
+		err := authorize()
+		if err != nil {
+			log.Fatalf("[ERROR] %v", err)
+		}
+		fmt.Println("All configured accounts have credentials.")
+		return
 	}
 
 	// parse the interval, if present, right away
@@ -124,17 +135,32 @@ func run() error {
 
 	repo.NumWorkers = concurrency
 
-	err = repo.StoreAll(keepEverything)
+	err = repo.Store(keepEverything)
 	if err != nil {
 		return err
 	}
 
-	if sync {
-		err := repo.Sync()
+	if prune {
+		err := repo.Prune()
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func authorize() error {
+	fmt.Println("[Authorization Mode]")
+	fmt.Println("No backups will be performed, but credentials will be obtained")
+	fmt.Println("and stored to the database in the repo. You may then use this")
+	fmt.Println("repository headless.\n")
+
+	repo, err := photobak.OpenRepo(repoDir)
+	if err != nil {
+		return fmt.Errorf("opening repository: %v", err)
+	}
+	defer repo.Close()
+
+	return repo.AuthorizeAllAccounts()
 }

@@ -97,6 +97,7 @@ func (r *Repository) getCredentials(pa providerAccount) ([]byte, error) {
 		return nil, fmt.Errorf("loading credentials for %s: %v", pa.username, err)
 	}
 	if creds == nil {
+		fmt.Printf("Credentials needed for %s (%s).\n", pa.username, pa.provider.Title)
 		// we need to get credentials to access cloud provider
 		creds, err = pa.provider.Credentials(pa.username)
 		if err != nil {
@@ -110,7 +111,15 @@ func (r *Repository) getCredentials(pa providerAccount) ([]byte, error) {
 	return creds, nil
 }
 
-// StoreAll downloads all media from all registered accounts
+// AuthorizeAllAccounts will obtain authorization for all
+// configured accounts and then store them in the database,
+// but will not perform any other tasks.
+func (r *Repository) AuthorizeAllAccounts() error {
+	_, err := r.authorizedAccounts()
+	return err
+}
+
+// Store downloads all media from all registered accounts
 // and stores it in the repository path. It is idempotent in
 // that it can be run multiple times (assuming the same
 // accounts are configured) and only the items that need to
@@ -124,49 +133,24 @@ func (r *Repository) getCredentials(pa providerAccount) ([]byte, error) {
 // images or the number of comments on album) is important to
 // you, set it to true.
 //
-// StoreAll operates per-collection (per-album), that is, it
+// Store operates per-collection (per-album), that is, it
 // iterates each collection and downloads all the items for
 // each collection, and organizes them by collection name
 // on disk.
 //
-// StoreAll does not download multiple copies of the same
+// Store does not download multiple copies of the same
 // photo, assuming the provider correctly IDs each item.
 // If an item appears in more than one collection, the
 // filepath to the item will be written to a text file
 // in the other collection.
 //
-// StoreAll is NOT destructive or re-organizive (is that
+// Store is NOT destructive or re-organizive (is that
 // a word?). Collections that are deleted remotely, or items
 // that are removed from collections or deleted entirely,
 // will not disappear locally by running this method. It
 // will, however, update existing items if they are outdated,
 // missing, or corrupted locally.
-func (r *Repository) StoreAll(saveEverything bool) error {
-	return r.storeAll(saveEverything, false)
-}
-
-// authorizedAccounts gets a list of all the configured accounts
-// and attaches an authorized client to each one.
-func (r *Repository) authorizedAccounts() ([]accountClient, error) {
-	var accounts []accountClient
-	for _, pa := range getAccounts() {
-		creds, err := r.getCredentials(pa)
-		if err != nil {
-			return nil, fmt.Errorf("getting credentials: %v", err)
-		}
-		client, err := pa.provider.NewClient(creds)
-		if err != nil {
-			return nil, fmt.Errorf("getting authenticated client: %v", err)
-		}
-		accounts = append(accounts, accountClient{
-			account: pa,
-			client:  client,
-		})
-	}
-	return accounts, nil
-}
-
-func (r *Repository) storeAll(saveEverything, doSync bool) error {
+func (r *Repository) Store(saveEverything bool) error {
 	accounts, err := r.authorizedAccounts()
 	if err != nil {
 		return err
@@ -212,6 +196,28 @@ func (r *Repository) storeAll(saveEverything, doSync bool) error {
 
 	wg.Wait()
 	return nil
+}
+
+// authorizedAccounts gets a list of all the configured accounts
+// and attaches an authorized client to each one; it will obtain
+// credentials if needed.
+func (r *Repository) authorizedAccounts() ([]accountClient, error) {
+	var accounts []accountClient
+	for _, pa := range getAccounts() {
+		creds, err := r.getCredentials(pa)
+		if err != nil {
+			return nil, fmt.Errorf("getting credentials: %v", err)
+		}
+		client, err := pa.provider.NewClient(creds)
+		if err != nil {
+			return nil, fmt.Errorf("getting authenticated client: %v", err)
+		}
+		accounts = append(accounts, accountClient{
+			account: pa,
+			client:  client,
+		})
+	}
+	return accounts, nil
 }
 
 // processCollection will process a collection from a provider.
