@@ -79,7 +79,17 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 		albums[i] = results.Entries[i]
 	}
 
-	// TODO: Move Auto Backup to end
+	// move Auto Backup to the end, since I think generally
+	// users will want the physical files in the albums
+	// they've curated, rather than the default 'everything'
+	// album with thousands of items in it.
+	for i, album := range albums {
+		if album.CollectionName() == "Auto Backup" {
+			albums = append(albums[:i], albums[i+1:]...)
+			albums = append(albums, album)
+			break
+		}
+	}
 
 	return albums, nil
 }
