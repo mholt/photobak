@@ -192,7 +192,7 @@ func (r *Repository) Store(saveEverything bool) error {
 			}
 		}
 	}
-	//close(ctxChan) // TODO: We need a clean way to close this
+	close(ctxChan)
 
 	wg.Wait()
 	return nil
@@ -269,12 +269,14 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 		return fmt.Errorf("saving collection to database: %v", err)
 	}
 
-	itemChan := make(chan Item)
-
 	// for each item that is listed by the client,
 	// wrap it in a context and pass it to the workers
 	// to do the processing & downloading.
+	itemChan := make(chan Item)
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for receivedItem := range itemChan {
 			ctxChan <- itemContext{
 				item:           receivedItem,
@@ -290,6 +292,11 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 	if err != nil {
 		return fmt.Errorf("listing collection items: %v", err)
 	}
+
+	// block until our goroutine has finished reading items; this
+	// is important because the context channel is closed once
+	// all of these functions have stopped
+	wg.Wait()
 
 	return nil
 }
