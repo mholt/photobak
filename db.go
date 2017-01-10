@@ -93,7 +93,7 @@ func (db *boltDB) loadItem(acct providerAccount, itemID string) (*DBItem, error)
 	return item, err
 }
 
-func (db *boltDB) saveItem(acct providerAccount, id string, item *DBItem) error {
+func (db *boltDB) deleteItem(acct providerAccount, itemID string) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		accountBucket := tx.Bucket(acct.key())
 		if accountBucket == nil {
@@ -103,12 +103,142 @@ func (db *boltDB) saveItem(acct providerAccount, id string, item *DBItem) error 
 		if items == nil {
 			return fmt.Errorf("account '%s' is missing 'items' bucket", acct)
 		}
+		return items.Delete([]byte(itemID))
+	})
+}
+
+func (db *boltDB) deleteCollection(acct providerAccount, collID string) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		accountBucket := tx.Bucket(acct.key())
+		if accountBucket == nil {
+			return fmt.Errorf("account '%s' does not exist in DB", acct)
+		}
+		items := accountBucket.Bucket([]byte("collections"))
+		if items == nil {
+			return fmt.Errorf("account '%s' is missing 'collections' bucket", acct)
+		}
+		return items.Delete([]byte(collID))
+	})
+}
+
+func (db *boltDB) saveItem(pa providerAccount, id string, item *DBItem) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		accountBucket := tx.Bucket(pa.key())
+		if accountBucket == nil {
+			return fmt.Errorf("account '%s' does not exist in DB", pa)
+		}
+
+		// first save the item
+		items := accountBucket.Bucket([]byte("items"))
+		if items == nil {
+			return fmt.Errorf("account '%s' is missing 'items' bucket", pa)
+		}
 		itemEnc, err := gobEncode(item)
 		if err != nil {
 			return err
 		}
-		return items.Put([]byte(id), itemEnc)
+		err = items.Put([]byte(id), itemEnc)
+		if err != nil {
+			return err
+		}
+
+		// then update the collections so they know they contain this item
+		collections := accountBucket.Bucket([]byte("collections"))
+		if collections == nil {
+			return fmt.Errorf("account '%s' is missing 'collections' bucket", pa)
+		}
+		for collID := range item.Collections {
+			err = db.addItemToCollection(accountBucket, id, collID)
+			if err != nil {
+				return fmt.Errorf("saving item to collection in DB: %v", err)
+			}
+		}
+
+		return nil
 	})
+}
+
+func (db *boltDB) saveItemToCollection(pa providerAccount, itemID, collID string) error {
+	return db.Update(func(tx *bolt.Tx) error {
+		accountBucket := tx.Bucket(pa.key())
+		if accountBucket == nil {
+			return fmt.Errorf("account '%s' does not exist in DB", pa)
+		}
+		return db.addItemToCollection(accountBucket, itemID, collID)
+	})
+}
+
+func (db *boltDB) addItemToCollection(accountBucket *bolt.Bucket, itemID, collID string) error {
+	// first get the item
+	items := accountBucket.Bucket([]byte("items"))
+	if items == nil {
+		return fmt.Errorf("missing 'items' bucket")
+	}
+	item := &DBItem{Collections: make(map[string]struct{})}
+	err := gobDecode(items.Get([]byte(itemID)), &item)
+	if err != nil {
+		return fmt.Errorf("decoding item: %v", err)
+	}
+
+	// then add the collection ID to the item
+	item.Collections[collID] = struct{}{}
+
+	// save the item
+	itemEnc, err := gobEncode(item)
+	if err != nil {
+		return err
+	}
+	err = items.Put([]byte(itemID), itemEnc)
+	if err != nil {
+		return err
+	}
+
+	// then open the collections bucket
+	collections := accountBucket.Bucket([]byte("collections"))
+	if collections == nil {
+		return fmt.Errorf("account is missing 'collections' bucket")
+	}
+
+	// get the collection
+	coll := DBCollection{Items: make(map[string]struct{})}
+	err = gobDecode(collections.Get([]byte(collID)), &coll)
+	if err != nil {
+		return fmt.Errorf("decoding collection: %v", err)
+	}
+
+	// update its set of items to include this one
+	coll.Items[itemID] = struct{}{}
+	collEnc, err := gobEncode(coll)
+	if err != nil {
+		return fmt.Errorf("encoding collection: %v", err)
+	}
+
+	// save the collection
+	err = collections.Put([]byte(collID), collEnc)
+	if err != nil {
+		return fmt.Errorf("saving collection: %v", err)
+	}
+
+	return nil
+}
+
+func (db *boltDB) collectionIDs(pa providerAccount) ([]string, error) {
+	var list []string
+	err := db.View(func(tx *bolt.Tx) error {
+		accountBucket := tx.Bucket(pa.key())
+		if accountBucket == nil {
+			return fmt.Errorf("account '%s' does not exist in DB", pa)
+		}
+		collections := accountBucket.Bucket([]byte("collections"))
+		if collections == nil {
+			return fmt.Errorf("account '%s' is missing 'collections' bucket", pa)
+		}
+		return collections.ForEach(func(k, v []byte) error {
+			list = append(list, string(k))
+			return nil
+		})
+	})
+	return list, err
 }
 
 func (db *boltDB) loadCollection(pa providerAccount, collID string) (*DBCollection, error) {

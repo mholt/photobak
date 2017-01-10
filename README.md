@@ -52,13 +52,13 @@ To specify more accounts, just rinse and repeat:
 $ photobak -googlephotos you@yours.com -googlephotos them@theirs.com
 ```
 
-Photobak stores all content in a repository. The default repository is "./photos_backup", relative to the current working directory. You can change this with the `-repo` flag: `-repo ~/backups`. Inside the repository, a `.db` file is created. This is Photobak's index. Don't delete it. Don't change or move the files in the repository, or Photobak will probably try to re-download them next time. It keeps an accounting of all files in the repository.
+Photobak stores all content in a repository. The default repository is "./photos_backup", relative to the current working directory. You can change this with the `-repo` flag: `-repo ~/backups`. Inside the repository, a `.db` file is created. This is Photobak's index. Don't delete it. Don't change or move the files in the repository, or Photobak will probably try to re-download them next time. It keeps an accounting of all files in the repository and does integrity checks.
+
+A photo or video may appear in more than one album. This is fine, but Photobak will not store more than one copy of a photo or video. Instead, it will write the path to where the file can be found out to a file in the album called "others.txt". You can follow those paths to find the rest of the photos for an album.
 
 By default, photobak only stores what it needs to do its archiving functions. You can tell it to store everything the cloud service returns with the `-everything` flag, but be aware it will increase the size of the index. For Google Photos, this extra information is things like links to thumbnails of various sizes, whether comments are enabled, license details, etc. You do not need to use this flag to store photo captions, names, or GPS coordinates from EXIF (Photobak extracts and saves those anyway).
 
-Photobak will not delete or move photos around once they are downloaded. If you delete or move a photo remotely, Photobak will not automatically delete or move them locally. This is because photobak is a backup utility, not a sync tool. You can force a sync by specifying the `-sync` flag, which will first delete all photos and albums that don't exist remotely anymore, and then it will continue to perform a backup. **(TODO! THE SYNC FEATURE IS NOT YET IMPLEMENTED.)**
-
-A photo or video may appear in more than one album. This is fine, but Photobak will not store more than one copy of a photo or video. Instead, it will write the path to where the file can be found out to a file in the album called "others.txt". You can follow those paths to find the rest of the photos for an album.
+Photobak will not delete or move photos around once they are downloaded. If you delete or move a photo remotely, Photobak will not automatically delete or move them locally. This is because photobak is a backup utility, not a sync tool. You can force a sync by specifying the `-sync` flag, which will first perform an additive backup like normal, then delete all photos and albums that don't exist remotely anymore. Use sync mode to help keep disk usage under control if you've been managing photos remotely, but only when you are sure the API is healthy, since items that disappear from responses will be deleted from disk.
 
 Repositories are portable. You can move them around, back them up, etc, so long as you do not disturb the structure or contents within a repository.
 

@@ -19,7 +19,9 @@ var (
 	repoDir        = "./photos_backup"
 	keepEverything = false
 	logFile        = "stderr"
+	concurrency    = 5
 	every          string
+	sync           bool
 )
 
 func init() {
@@ -27,10 +29,16 @@ func init() {
 	flag.BoolVar(&keepEverything, "everything", keepEverything, "Whether to store all metadata returned by API for each item")
 	flag.StringVar(&logFile, "log", logFile, "Write logs to a file, stdout, or stderr")
 	flag.StringVar(&every, "every", every, "How often to run this command, blocking indefinitely")
+	flag.IntVar(&concurrency, "concurrency", concurrency, "How many downloads to do in parallel")
+	flag.BoolVar(&sync, "sync", sync, "Download new items then perform a destructive sync")
 }
 
 func main() {
 	flag.Parse()
+
+	if concurrency < 1 {
+		log.Fatal("concurrency must be at least 1")
+	}
 
 	switch logFile {
 	case "stdout":
@@ -59,7 +67,7 @@ func main() {
 		}
 	}
 
-	err := storeAll()
+	err := run()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -68,7 +76,7 @@ func main() {
 		c := time.Tick(itvl)
 		for range c {
 			log.Println("Running backup")
-			err := storeAll()
+			err := run()
 			if err != nil {
 				log.Println(err)
 			}
@@ -105,16 +113,27 @@ func parseEvery(every string) (time.Duration, error) {
 	return time.Duration(minutes) * time.Minute, nil
 }
 
-func storeAll() error {
+func run() error {
 	repo, err := photobak.OpenRepo(repoDir)
 	if err != nil {
 		return fmt.Errorf("opening repo: %v", err)
 	}
 	defer repo.Close()
 
+	// TODO: Close the repo cleanly if SIGINT is received
+
+	repo.NumWorkers = concurrency
+
 	err = repo.StoreAll(keepEverything)
 	if err != nil {
 		return err
+	}
+
+	if sync {
+		err := repo.Sync()
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

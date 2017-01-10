@@ -1,7 +1,6 @@
 package photobak
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"fmt"
@@ -44,6 +43,10 @@ type Repository struct {
 	// be used to ensure different filenames for each one.
 	itemNames   map[string]chan struct{}
 	itemNamesMu sync.Mutex
+
+	// NumWorkers is how many download workers to operate
+	// in parallel.
+	NumWorkers int
 }
 
 // OpenRepo opens a repository that is ready to store backups
@@ -107,8 +110,6 @@ func (r *Repository) getCredentials(pa providerAccount) ([]byte, error) {
 	return creds, nil
 }
 
-// TODO: Should large collections be split up into folders with max. 1000 items in each? <nod>
-
 // StoreAll downloads all media from all registered accounts
 // and stores it in the repository path. It is idempotent in
 // that it can be run multiple times (assuming the same
@@ -141,53 +142,82 @@ func (r *Repository) getCredentials(pa providerAccount) ([]byte, error) {
 // will, however, update existing items if they are outdated,
 // missing, or corrupted locally.
 func (r *Repository) StoreAll(saveEverything bool) error {
-	// to each account, attach an authorized Client
+	return r.storeAll(saveEverything, false)
+}
+
+// authorizedAccounts gets a list of all the configured accounts
+// and attaches an authorized client to each one.
+func (r *Repository) authorizedAccounts() ([]accountClient, error) {
 	var accounts []accountClient
 	for _, pa := range getAccounts() {
 		creds, err := r.getCredentials(pa)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("getting credentials: %v", err)
 		}
 		client, err := pa.provider.NewClient(creds)
 		if err != nil {
-			return fmt.Errorf("getting authenticated client: %v", err)
+			return nil, fmt.Errorf("getting authenticated client: %v", err)
 		}
 		accounts = append(accounts, accountClient{
 			account: pa,
 			client:  client,
 		})
 	}
+	return accounts, nil
+}
+
+func (r *Repository) storeAll(saveEverything, doSync bool) error {
+	accounts, err := r.authorizedAccounts()
+	if err != nil {
+		return err
+	}
+
+	// prepare to start a number of workers that will perform downloads
+	var wg sync.WaitGroup
+	ctxChan := make(chan itemContext)
+	numWorkers := r.NumWorkers
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	// spawn worker goroutines
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for itemCtx := range ctxChan {
+				log.Println("Processing", itemCtx.item.ItemName())
+				err := r.processItem(itemCtx)
+				if err != nil {
+					log.Println(err)
+				}
+			}
+		}()
+	}
 
 	// perform downloads for each account
 	for _, ac := range accounts {
-		var wg sync.WaitGroup
-		wg.Add(1) // a "barrier" just in case Add() is never called in this loop
-
 		listedCollections, err := ac.client.ListCollections()
 		if err != nil {
 			return err
 		}
-
 		for _, listedColl := range listedCollections {
-			err := r.processCollection(listedColl, ac, &wg, saveEverything)
+			err := r.processCollection(listedColl, ac, ctxChan, saveEverything)
 			if err != nil {
 				return err
 			}
 		}
-
-		wg.Done() // remove "barrier" to cover the case where Add() isn't called for this account
-		wg.Wait()
 	}
+	//close(ctxChan) // TODO: We need a clean way to close this
 
+	wg.Wait()
 	return nil
 }
 
 // processCollection will process a collection from a provider.
-func (r *Repository) processCollection(listedColl Collection, ac accountClient, wg *sync.WaitGroup, saveEverything bool) error {
-	itemChan := make(chan Item)
-
+func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext, saveEverything bool) error {
 	// see if we have the collection in the db already
-	loadedColl, err := r.db.loadCollection(ac.account, listedColl.CollectionID())
+	dbc, err := r.db.loadCollection(ac.account, listedColl.CollectionID())
 	if err != nil {
 		return err
 	}
@@ -196,7 +226,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 	// we need to choose a folder name that's not in use (in case the name
 	// is the same as an existing collection), otherwise use existing path.
 	coll := collection{Collection: listedColl}
-	if loadedColl == nil {
+	if dbc == nil {
 		// it's new! great, make sure we don't overwrite (merge) with
 		// an existing collection of the same name in this account.
 		coll.dirName, err = r.reserveUniqueFilename(ac.account.accountPath(), listedColl.CollectionName(), true)
@@ -205,24 +235,27 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 		}
 	} else {
 		// we've seen this collection before, so use folder already on disk.
-		coll.dirName = loadedColl.DirName
+		coll.dirName = dbc.DirName
 	}
 	coll.dirPath = r.repoRelative(filepath.Join(ac.account.accountPath(), coll.dirName))
 
 	// save collection to database
-	dbc := &DBCollection{
-		ID:      coll.CollectionID(),
-		Name:    coll.CollectionName(),
-		DirName: coll.dirName,
-		DirPath: coll.dirPath,
-		Saved:   time.Now(),
+	if dbc == nil {
+		dbc = &DBCollection{
+			ID:      coll.CollectionID(),
+			Name:    coll.CollectionName(),
+			DirName: coll.dirName,
+			DirPath: coll.dirPath,
+			Items:   make(map[string]struct{}),
+		}
 	}
+	dbc.Saved = time.Now()
 	if saveEverything {
 		dbc.Meta.API = coll.Collection
 	}
 	err = r.db.saveCollection(ac.account, dbc.ID, dbc)
 	if err != nil {
-		if loadedColl == nil {
+		if dbc == nil {
 			// this was a new collection, couldn't save it to DB,
 			// so don't leave a stray folder on disk.
 			os.Remove(coll.dirPath)
@@ -230,21 +263,23 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 		return fmt.Errorf("saving collection to database: %v", err)
 	}
 
-	// start some workers that will download items
-	for i := 0; i < 5; i++ { // TODO: make number of downloaders (workers) adjustable
-		wg.Add(1)
-		go func(ac accountClient, coll collection, itemChan chan Item) {
-			defer wg.Done()
-			for receivedItem := range itemChan {
-				err := r.processItem(receivedItem, coll, ac.account, ac.client, saveEverything)
-				if err != nil {
-					log.Println(err)
-				}
-			}
-		}(ac, coll, itemChan)
-	}
+	itemChan := make(chan Item)
 
-	// kick off the work for this account
+	// for each item that is listed by the client,
+	// wrap it in a context and pass it to the workers
+	// to do the processing & downloading.
+	go func() {
+		for receivedItem := range itemChan {
+			ctxChan <- itemContext{
+				item:           receivedItem,
+				coll:           coll,
+				ac:             ac,
+				saveEverything: saveEverything,
+			}
+		}
+	}()
+
+	// begin processing all the items for this collection
 	err = ac.client.ListCollectionItems(coll, itemChan)
 	if err != nil {
 		return fmt.Errorf("listing collection items: %v", err)
@@ -254,11 +289,11 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 }
 
 // processItem will process an item from a provider.
-func (r *Repository) processItem(receivedItem Item, coll collection, pa providerAccount, client Client, saveEverything bool) error {
-	itemID := receivedItem.ItemID()
+func (r *Repository) processItem(ctx itemContext) error { //(receivedItem Item, coll collection, ac accountClient, saveEverything bool) error {
+	itemID := ctx.item.ItemID()
 
 	// check if we already have it
-	loadedItem, err := r.db.loadItem(pa, itemID)
+	loadedItem, err := r.db.loadItem(ctx.ac.account, itemID)
 	if err != nil {
 		return fmt.Errorf("loading item '%s' from database: %v", itemID, err)
 	}
@@ -267,13 +302,14 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 		// we don't have it yet; download and save item.
 
 		it := item{
-			Item:     receivedItem,
-			fileName: receivedItem.ItemName(),
-			filePath: r.repoRelative(filepath.Join(pa.accountPath(), coll.dirName, receivedItem.ItemName())),
-			isNew:    true,
+			Item:        ctx.item,
+			fileName:    ctx.item.ItemName(),
+			filePath:    r.repoRelative(filepath.Join(ctx.ac.account.accountPath(), ctx.coll.dirName, ctx.item.ItemName())),
+			isNew:       true,
+			collections: map[string]struct{}{ctx.coll.CollectionID(): {}},
 		}
 
-		err = r.downloadAndSaveItem(client, it, coll, pa, saveEverything)
+		err = r.downloadAndSaveItem(ctx.ac.client, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
 		if err != nil {
 			os.Remove(r.fullPath(it.filePath))
 			return fmt.Errorf("downloading and saving new item: %v", err)
@@ -290,16 +326,20 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 		// 	// and update the metadata in the database.
 		// }
 
-		// if we don't have it in this album already,
-		// add path to text file in this album.
-		has, err := r.localCollectionHasItem(pa, coll, loadedItem)
+		// if we don't have it on disk as a file or in the media list file for
+		// this collection already, add path to text file in this collection.
+		has, err := r.localCollectionHasItemOnDisk(ctx.ac.account, ctx.coll, loadedItem)
 		if err != nil {
 			return fmt.Errorf("checking if local collection has item: %v", err)
 		}
 		if !has {
-			err := r.writeToMediaListFile(pa, coll, loadedItem.FilePath)
+			err := r.writeToMediaListFile(ctx.coll, loadedItem.FilePath)
 			if err != nil {
 				return fmt.Errorf("writing to media list file: %v", err)
+			}
+			err = r.db.saveItemToCollection(ctx.ac.account, itemID, ctx.coll.CollectionID())
+			if err != nil {
+				return fmt.Errorf("saving item to collection in DB: %v", err)
 			}
 		}
 
@@ -312,12 +352,13 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 			log.Printf("[ERROR] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
 
 			it := item{
-				Item:     receivedItem,
-				fileName: loadedItem.FileName,
-				filePath: loadedItem.FilePath,
+				Item:        ctx.item,
+				fileName:    loadedItem.FileName,
+				filePath:    loadedItem.FilePath,
+				collections: loadedItem.Collections,
 			}
 
-			err := r.downloadAndSaveItem(client, it, coll, pa, saveEverything)
+			err := r.downloadAndSaveItem(ctx.ac.client, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
 			if err != nil {
 				return fmt.Errorf("re-downloading and saving existing item: %v", err)
 			}
@@ -334,6 +375,7 @@ func (r *Repository) processItem(receivedItem Item, coll collection, pa provider
 // It reserves the filename by creating it in dir, and returns the
 // name of the file (or directory, depending on isDir) created in dir.
 func (r *Repository) reserveUniqueFilename(dir, targetName string, isDir bool) (string, error) {
+	// ensure that only one reservation takes place for this name at a time
 	targetPath := filepath.Join(dir, targetName)
 	r.itemNamesMu.Lock()
 	ch, taken := r.itemNames[targetPath]
@@ -345,17 +387,25 @@ func (r *Repository) reserveUniqueFilename(dir, targetName string, isDir bool) (
 	ch = make(chan struct{})
 	r.itemNames[targetPath] = ch
 	r.itemNamesMu.Unlock()
+	defer func() {
+		r.itemNamesMu.Lock()
+		delete(r.itemNames, targetPath)
+		close(ch)
+		r.itemNamesMu.Unlock()
+	}()
 
-	candidate := targetName
+	// iterate until we find a candidate name that we can use
+	candidate, candidatePath := targetName, targetPath
 	for i := 2; i < 1000; i++ { // this can handle up to 1000 collisions
-		if !r.fileExists(filepath.Join(dir, candidate)) {
+		candidatePath = filepath.Join(dir, candidate)
+		if !r.fileExists(candidatePath) {
 			break
 		}
 		parts := strings.SplitN(targetName, ".", 2)
 		candidate = strings.Join(parts, fmt.Sprintf("-%03d.", i))
 	}
 
-	finalPath := r.fullPath(filepath.Join(dir, candidate))
+	finalPath := r.fullPath(candidatePath)
 
 	if isDir {
 		err := os.MkdirAll(finalPath, 0700)
@@ -369,11 +419,6 @@ func (r *Repository) reserveUniqueFilename(dir, targetName string, isDir bool) (
 		}
 		f.Close()
 	}
-
-	r.itemNamesMu.Lock()
-	delete(r.itemNames, targetPath)
-	close(ch)
-	r.itemNamesMu.Unlock()
 
 	return candidate, nil
 }
@@ -420,26 +465,26 @@ func (w dishonestWriter) Write(p []byte) (int, error) {
 func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection, pa providerAccount, saveEverything bool) error {
 	itemID := it.ItemID()
 	mapKey := pa.provider.Name + ":" + itemID
+	it.collections[coll.CollectionID()] = struct{}{}
 
 	r.downloadingMu.Lock()
 	dlPath, ok := r.downloading[mapKey]
 	if ok {
 		r.downloadingMu.Unlock()
-		// it's already being downloaded.
+		// it's already being downloaded...
 
 		if dlPath != it.filePath {
-			// ... but to a different location. so we
+			// ... but to a different collection. so we
 			// should write out that location to a text
 			// file in this coll so the owner can find
 			// it later if they want to, and we don't
 			// duplicate the file on disk.
-			err := r.writeToMediaListFile(pa, coll, dlPath)
+			err := r.writeToMediaListFile(coll, dlPath)
 			if err != nil {
 				return err
 			}
+			return r.db.saveItemToCollection(pa, itemID, coll.CollectionID())
 		}
-
-		// TODO: Take any note in the database that it's in this coll?
 
 		return nil
 	}
@@ -453,21 +498,18 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		r.downloadingMu.Unlock()
 	}(mapKey)
 
+	err := os.MkdirAll(r.fullPath(coll.dirPath), 0700)
+	if err != nil {
+		return fmt.Errorf("creating folder for collection '%s': %v", coll.CollectionName(), err)
+	}
+
 	if it.isNew {
 		itemFileName, err := r.reserveUniqueFilename(coll.dirPath, it.ItemName(), false)
 		if err != nil {
 			return fmt.Errorf("reserving unique filename: %v", err)
 		}
-		it = item{
-			Item:     it.Item,
-			fileName: itemFileName,
-			filePath: r.repoRelative(filepath.Join(coll.dirPath, itemFileName)),
-		}
-	}
-
-	err := os.MkdirAll(r.fullPath(coll.dirPath), 0700)
-	if err != nil {
-		return fmt.Errorf("creating folder for collection '%s': %v", coll.CollectionName(), err)
+		it.fileName = itemFileName
+		it.filePath = r.repoRelative(filepath.Join(coll.dirPath, itemFileName))
 	}
 
 	outFile, err := os.Create(r.fullPath(it.filePath))
@@ -511,7 +553,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	// I don't care about the error here. Might just not have EXIF data.
 	setting, _ := r.getSettingFromEXIF(x)
 
-	meta := ItemMeta{Setting: setting}
+	meta := ItemMeta{Setting: setting, Caption: it.ItemCaption()}
 	if saveEverything {
 		// NOTE: If the item caption is already stored as
 		// part of the Item, this will duplicate it in
@@ -520,15 +562,14 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	}
 
 	dbi := &DBItem{
-		ID:           itemID,
-		Name:         it.ItemName(),
-		FileName:     it.fileName,
-		FilePath:     r.repoRelative(it.filePath),
-		Caption:      it.ItemCaption(),
-		Meta:         meta,
-		Saved:        time.Now(),
-		CollectionID: coll.CollectionID(),
-		Hash:         h.Sum(nil),
+		ID:          itemID,
+		Name:        it.ItemName(),
+		FileName:    it.fileName,
+		FilePath:    r.repoRelative(it.filePath),
+		Meta:        meta,
+		Saved:       time.Now(),
+		Collections: it.collections,
+		Hash:        h.Sum(nil),
 	}
 
 	err = r.db.saveItem(pa, itemID, dbi)
@@ -556,13 +597,6 @@ func (r *Repository) repoRelative(fpath string) string {
 // directory") path for interaction with the file system.
 func (r *Repository) fullPath(repoRelative string) string {
 	return filepath.Join(r.path, repoRelative)
-}
-
-// mediaListPath returns the path to the media list file for
-// the given collection. The returned path is repo-relative
-// if coll.dirPath is repo-relative (which it should be).
-func (r *Repository) mediaListPath(coll collection) string {
-	return filepath.Join(coll.dirPath, "others.txt")
 }
 
 // getSettingFromEXIF extracts coordinate, timestamp, and
@@ -618,33 +652,17 @@ func (r *Repository) getSettingFromEXIF(x *exif.Exif) (*Setting, error) {
 	}, nil
 }
 
-// localCollectionHasItem returns true if the given collection
+// localCollectionHasItemOnDisk returns true if the given collection
 // has the item in it, either as an actual file or a reference
 // in the media list file.
-func (r *Repository) localCollectionHasItem(pa providerAccount, coll collection, localItem *DBItem) (bool, error) {
+func (r *Repository) localCollectionHasItemOnDisk(pa providerAccount, coll collection, localItem *DBItem) (bool, error) {
 	// check for item on disk first
-	if r.fileExists(localItem.FilePath) {
+	if r.fileExists(filepath.Join(coll.dirPath, localItem.FileName)) {
 		return true, nil
 	}
 
 	// check others.txt file to see if item is in the list
-	file, err := os.Open(r.fullPath(r.mediaListPath(coll)))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fpath := strings.TrimSpace(scanner.Text())
-		if fpath == localItem.FilePath {
-			return true, nil
-		}
-	}
-
-	return false, scanner.Err()
+	return r.mediaListHasItem(coll.dirPath, localItem)
 }
 
 // fileExists returns true if there is not an
@@ -653,26 +671,6 @@ func (r *Repository) localCollectionHasItem(pa providerAccount, coll collection,
 func (r *Repository) fileExists(fpath string) bool {
 	_, err := os.Stat(r.fullPath(fpath))
 	return err == nil
-}
-
-// writeToMediaListFile adds dlPath to the media list file
-// in the given collection for the given account.
-func (r *Repository) writeToMediaListFile(pa providerAccount, coll collection, dlPath string) error {
-	err := os.MkdirAll(coll.dirPath, 0700)
-	if err != nil {
-		return fmt.Errorf("making folder %s: %v", coll.dirPath, err)
-	}
-	mediaListFile := r.fullPath(r.mediaListPath(coll))
-	of, err := os.OpenFile(mediaListFile, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return fmt.Errorf("opening media list file %s: %v", mediaListFile, err)
-	}
-	defer of.Close()
-	_, err = fmt.Fprintln(of, dlPath)
-	if err != nil {
-		return fmt.Errorf("appending to media list file %s: %v", mediaListFile, err)
-	}
-	return nil
 }
 
 // accountClient is a providerAccount with

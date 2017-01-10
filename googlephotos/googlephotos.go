@@ -79,6 +79,8 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 		albums[i] = results.Entries[i]
 	}
 
+	// TODO: Move Auto Backup to end
+
 	return albums, nil
 }
 

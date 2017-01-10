@@ -24,6 +24,8 @@ type Client interface {
 
 	// ListCollectionItems gets all the media in the
 	// collection and sends each one down the channel.
+	// The implementation MUST close the Item channel
+	// when there are no more items to list!
 	ListCollectionItems(Collection, chan Item) error
 
 	// DownloadItemInto gets the item from the service
@@ -95,9 +97,17 @@ type collection struct {
 // an existing file on disk.
 type item struct {
 	Item
-	fileName string
-	filePath string
-	isNew    bool
+	fileName    string
+	filePath    string
+	isNew       bool
+	collections map[string]struct{}
+}
+
+type itemContext struct {
+	item           Item
+	coll           collection
+	ac             accountClient
+	saveEverything bool
 }
 
 // DBCollection represents a collection (album,
@@ -110,6 +120,7 @@ type DBCollection struct {
 	DirPath string    // the repo-relative path to collection directory on disk
 	Saved   time.Time // when this collection was put into the DB (or updated)
 	Meta    CollectionMeta
+	Items   map[string]struct{} // the IDs of items that are in this collection
 }
 
 // CollectionMeta is extra information
@@ -120,15 +131,15 @@ type CollectionMeta struct {
 
 // DBItem represents an item stored in the database.
 type DBItem struct {
-	ID           string    // unique ID for this item (should be same across all collections)
-	Name         string    // name as given by the API, usually the file name
-	FileName     string    // same as Name, unless there is another file with the same name in its folder
-	FilePath     string    // repo-relative path to the file on disk
-	Hash         []byte    // sha256 of the contents
-	Saved        time.Time // when this item was put into the DB (or updated)
-	CollectionID string    // the key to index the album of this photo
-	Caption      string    // the summary/caption/description of the item, if not stored in Meta.
-	Meta         ItemMeta  // extra info
+	ID          string              // unique ID for this item (should be same across all collections)
+	Name        string              // name as given by the API, usually the file name
+	FileName    string              // same as Name, unless there is another file with the same name in its folder
+	FilePath    string              // repo-relative path to the file on disk
+	Hash        []byte              // sha256 of the contents
+	Saved       time.Time           // when this item was put into the DB (or updated)
+	Collections map[string]struct{} // the IDs of the collections this photo appears in
+	Caption     string              // the summary/caption/description of the item, if not stored in Meta.
+	Meta        ItemMeta            // extra info
 }
 
 // ItemMeta holds extra information about an item.
@@ -136,6 +147,7 @@ type DBItem struct {
 type ItemMeta struct {
 	API     Item     // everything given by remote/API; only stored if requested
 	Setting *Setting // obtained directly from embedded EXIF
+	Caption string   // the caption, summary, or description of the item
 }
 
 // Setting is a place and time. This information
