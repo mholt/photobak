@@ -210,11 +210,29 @@ func getAccounts() []providerAccount {
 
 // Provider represents a cloud storage provider.
 type Provider struct {
-	Name        string
-	Title       string
-	Accounts    func() []string
-	Credentials func(string) ([]byte, error)
-	NewClient   func([]byte) (Client, error)
+	// The lower-case, one word name of the provider.
+	// Used as the flag to configure accounts.
+	Name string
+
+	// The human-readable, proper-cased name of
+	// the provider.
+	Title string
+
+	// A function that gets a list of accounts
+	// configured for this provider. Return a list
+	// of usernames or account IDs or whatever.
+	Accounts func() []string
+
+	// A function to get credentials for the given
+	// username. Return the credentials as bytes so
+	// that your NewClient function can use them to
+	// create an authorized client.
+	Credentials func(username string) ([]byte, error)
+
+	// A function that returns an authorized client
+	// that can access the provider's API. The credentials
+	// to be used in the client are passed in.
+	NewClient func(credentials []byte) (Client, error)
 }
 
 // StringFlagList is used to store flags of repeating

@@ -49,7 +49,7 @@ type Client struct {
 
 // Name returns "googlephotos".
 func (c *Client) Name() string {
-	return "googlephotos"
+	return name
 }
 
 // ListCollections lists the albums belonging to the user.
