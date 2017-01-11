@@ -38,7 +38,8 @@ type Client interface {
 type Collection interface {
 	// CollectionID returns the unique ID of this
 	// collection; it will be used as a key in the
-	// local index.
+	// local index. It must be unique across all
+	// collections in the account.
 	CollectionID() string
 
 	// CollectionName returns the human-readable
@@ -59,20 +60,23 @@ type Item interface {
 	// have the same ID in both collections. If the IDs
 	// are different, the photo will be downloaded one time
 	// for each album that it's in, which is undesirable.
+	// The ID must be unique across all items in the
+	// account, but a single item must not have more than
+	// one ID, even if it appears in multiple albums!
 	ItemID() string
 
-	// ItemName returns the file name (with extension)
-	// of the item. No sanitization is performed on
-	// the name, so implementations must ensure that
-	// the name is safe as a filename.
+	// ItemName returns the file name of the item (with
+	// extension). No sanitization is performed on the
+	// name, so implementations must ensure that the
+	// name is safe to use as a filename.
 	ItemName() string
 
 	// ItemETag returns the ETag of this item. If the
 	// cloud provider does not support ETags, this
-	// can return an empty string and ETags will not
-	// be used. An ETag is used to download an item
-	// only when it has changed. It is effectively
-	// just a hash value.
+	// can return an empty string. An ETag is used to
+	// download an item only when it has changed. It is
+	// effectively just a hash value or "Last Updated"
+	// timestamp in a consistent format.
 	ItemETag() string
 
 	// ItemCaption is the caption or description
