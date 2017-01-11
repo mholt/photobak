@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,9 +24,16 @@ const (
 	title = "Google Photos"
 )
 
+var (
+	maxAlbums = -1
+	maxPhotos = -1
+)
+
 func init() {
 	var accounts photobak.StringFlagList
 	flag.Var(&accounts, name, "Add a "+title+" account to the repository")
+	flag.IntVar(&maxAlbums, "maxalbums", maxAlbums, "Maximum number of albums to process (-1 for all)")
+	flag.IntVar(&maxPhotos, "maxphotos", maxPhotos, "Maximum number of photos per album to process (-1 for all)")
 
 	photobak.RegisterProvider(photobak.Provider{
 		Name:        name,
@@ -54,13 +62,16 @@ func (c *Client) Name() string {
 
 // ListCollections lists the albums belonging to the user.
 func (c *Client) ListCollections() ([]photobak.Collection, error) {
+	if maxAlbums == 0 {
+		return []photobak.Collection{}, nil
+	}
+
 	// the picasa web album API docs say the default "kind" parameter
 	// value is "album" which is what we want, so we don't bother to
 	// specify it here.
 	url := "https://picasaweb.google.com/data/feed/api/user/default"
-	max := 0 // TODO: Temporary
-	if max > 0 {
-		url += fmt.Sprintf("?max-results=%d", max)
+	if maxAlbums > -1 {
+		url += fmt.Sprintf("?max-results=%d", maxAlbums)
 	}
 	data, err := c.getFeed(url)
 	if err != nil {
@@ -104,10 +115,22 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 //
 // Note that, due to a bug in the Picasa Web Albums API, there is a limit as to how
 // many photos can be retrieved on very large albums. See the README for more info.
-func (c *Client) ListCollectionItems(col photobak.Collection, itemChan chan photobak.Item) error {
+func (c *Client) ListCollectionItems(col photobak.Collection, itemChan chan photobak.Item) (err error) {
 	defer close(itemChan)
 	url := "https://picasaweb.google.com/data/feed/api/user/default/albumid/" + col.CollectionID()
-	return c.listAllPhotos(url, itemChan)
+	// try a few times in case there's a network error
+	for i := 0; i < 3; i++ {
+		err = c.listAllPhotos(url, itemChan)
+		if err != nil {
+			log.Printf("listing collection items (attempt %d): %v", i+1, err)
+			continue
+		}
+		break
+	}
+	if err != nil {
+		log.Printf("listing collection items: %v; giving up", err)
+	}
+	return
 }
 
 // listAllPhotos gets all photos in the album designated by the baseURL and pipes
@@ -118,18 +141,17 @@ func (c *Client) listAllPhotos(baseURL string, itemChan chan photobak.Item) erro
 
 	start := 1
 	count := 0
-	max := 0 // TODO: temporary
 
 	// we can't rely on NumPhotos in an album to be correct,
 	// and the number of photos can change while download is
 	// happening; so just keep downloading until no results.
 	// (the i == 0 condition ensures we run at least once.)
 	for i := 0; i == 0 || len(page.Entries) > 0; i++ {
-		if max > 0 && count >= max {
+		if maxPhotos > -1 && count >= maxPhotos {
 			break
 		}
 
-		page, err = c.listPhotosPage(baseURL, start, max-count)
+		page, err = c.listPhotosPage(baseURL, start, maxPhotos-count)
 		if err != nil {
 			return err
 		}
