@@ -134,11 +134,10 @@ func (e Entry) ItemName() string {
 
 // ItemETag returns the item's ETag.
 //
-// NOTE: We could use the ETag field, but it seems
-// Timestamp, Updated, Edited, or ImageVersion also
-// work. All these were somewhat tested with
-// changes and I chose to use Updated as the ETag.
-func (e Entry) ItemETag() string { return e.Updated.String() }
+// NOTE: I tried using Updated, but it was being changed
+// unreliably. We could also look into using Timestamp,
+// Edited, or ImageVersion if needed.
+func (e Entry) ItemETag() string { return e.ETag }
 
 // ItemCaption returns the item's summary/description.
 func (e Entry) ItemCaption() string { return e.Summary }
