@@ -168,7 +168,7 @@ func (r *Repository) Store(saveEverything bool) error {
 	}
 
 	// prepare to start a number of workers that will perform downloads
-	var wg sync.WaitGroup
+	var workerWg sync.WaitGroup
 	ctxChan := make(chan itemContext)
 	numWorkers := r.NumWorkers
 	if numWorkers < 1 {
@@ -177,9 +177,9 @@ func (r *Repository) Store(saveEverything bool) error {
 
 	// spawn worker goroutines
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
+		workerWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer workerWg.Done()
 			for itemCtx := range ctxChan {
 				err := r.processItem(itemCtx)
 				if err != nil {
@@ -190,21 +190,40 @@ func (r *Repository) Store(saveEverything bool) error {
 	}
 
 	// perform downloads for each account
+	var collWg sync.WaitGroup
+	throttle := make(chan struct{}, r.NumWorkers)
 	for _, ac := range accounts {
 		listedCollections, err := ac.client.ListCollections()
 		if err != nil {
 			return err
 		}
 		for _, listedColl := range listedCollections {
-			err := r.processCollection(listedColl, ac, ctxChan, saveEverything)
-			if err != nil {
-				return err
-			}
+			throttle <- struct{}{}
+			go func(listedColl Collection) {
+				defer func() { <-throttle }()
+				err := r.processCollection(listedColl, ac, ctxChan, saveEverything, &collWg)
+				if err != nil {
+					log.Printf("[ERROR] processing %s: %v", listedColl.CollectionName(), err)
+					return
+				}
+			}(listedColl)
+		}
+		for i := 0; i < cap(throttle); i++ {
+			throttle <- struct{}{} // make sure all goroutines have finished
 		}
 	}
-	close(ctxChan)
 
-	wg.Wait()
+	// block until all the workers are finished
+	workerWg.Wait()
+
+	// block until the processCollection() goroutines have finished
+	// wrapping all items; this is important because the context
+	// channel needs to be closed once they're done, but it is not
+	// safe to close the context channel before we are sure they
+	// finish
+	collWg.Wait()
+
+	close(ctxChan)
 	return nil
 }
 
@@ -231,7 +250,7 @@ func (r *Repository) authorizedAccounts() ([]accountClient, error) {
 }
 
 // processCollection will process a collection from a provider.
-func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext, saveEverything bool) error {
+func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext, saveEverything bool, wg *sync.WaitGroup) error {
 	Info.Printf("Processing collection %s: %s", listedColl.CollectionID(), listedColl.CollectionName())
 
 	// see if we have the collection in the db already
@@ -285,9 +304,9 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 	// wrap it in a context and pass it to the workers
 	// to do the processing & downloading.
 	itemChan := make(chan Item)
-	var wg sync.WaitGroup
+
 	wg.Add(1)
-	go func() {
+	go func(wg *sync.WaitGroup) {
 		defer wg.Done()
 		for receivedItem := range itemChan {
 			ctxChan <- itemContext{
@@ -297,7 +316,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 				saveEverything: saveEverything,
 			}
 		}
-	}()
+	}(wg)
 
 	// begin processing all the items for this collection
 	err = ac.client.ListCollectionItems(coll, itemChan)
@@ -305,18 +324,17 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 		return fmt.Errorf("listing collection items: %v", err)
 	}
 
-	// block until our goroutine has finished reading items; this
-	// is important because the context channel is closed once
-	// all of these functions have stopped
-	// TODO: It would be nice if the workers didn't all have to be
-	// working on the same collection at a time.
-	wg.Wait()
-
 	return nil
 }
 
 // processItem will process an item from a provider.
 func (r *Repository) processItem(ctx itemContext) error {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC] recovered from processItem: %v", r)
+		}
+	}()
+
 	itemID := ctx.item.ItemID()
 
 	// check if we already have it
