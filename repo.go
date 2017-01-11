@@ -181,7 +181,6 @@ func (r *Repository) Store(saveEverything bool) error {
 		go func() {
 			defer wg.Done()
 			for itemCtx := range ctxChan {
-				log.Println("Processing", itemCtx.item.ItemName())
 				err := r.processItem(itemCtx)
 				if err != nil {
 					log.Println(err)
@@ -233,6 +232,8 @@ func (r *Repository) authorizedAccounts() ([]accountClient, error) {
 
 // processCollection will process a collection from a provider.
 func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext, saveEverything bool) error {
+	Info.Printf("Processing collection %s: %s", listedColl.CollectionID(), listedColl.CollectionName())
+
 	// see if we have the collection in the db already
 	dbc, err := r.db.loadCollection(ac.account.key(), listedColl.CollectionID())
 	if err != nil {
@@ -335,6 +336,7 @@ func (r *Repository) processItem(ctx itemContext) error {
 			collections: map[string]struct{}{ctx.coll.CollectionID(): {}},
 		}
 
+		Info.Printf("Getting new item %s: %s", it.ItemID(), it.ItemName())
 		err = r.downloadAndSaveItem(ctx.ac.client, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
 		if err != nil {
 			os.Remove(r.fullPath(it.filePath))
@@ -377,6 +379,9 @@ func (r *Repository) processItem(ctx itemContext) error {
 			}
 			if corrupted {
 				log.Printf("[ERROR] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
+			}
+			if modifiedRemotely {
+				Info.Printf("File %s modified remotely; re-downloading", loadedItem.FilePath)
 			}
 
 			it := item{
@@ -585,14 +590,16 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			pr.Close()
 		}()
 
+		Info.Printf("[attempt %d] Downloading %s into %s", i+1, it.ItemID(), outFilePath)
 		err = client.DownloadItemInto(it.Item, mw)
 		outFile.Close()
 		if err == nil {
 			break
 		}
+		log.Printf("[ERROR] downloading %s, attempt %d: %v; retrying", it.filePath, i+1, err)
 	}
 	if err != nil {
-		return fmt.Errorf("downloading %s: %v", it.filePath, err)
+		return fmt.Errorf("repeatedly failed downloading %s: %v", it.filePath, err)
 	}
 
 	// I don't care about the error here. Not having EXIF data is OK.
@@ -650,6 +657,8 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			return fmt.Errorf("de-duplicating item '%s': %v", it.fileName, err)
 		}
 		if len(sameItems) > 0 {
+			Info.Printf("The content of item %s already exists in repository; de-duplicating", it.ItemID())
+
 			// this content is not unique; it exists elsewhere in the repo.
 			// save this item to this collection, but we'll delete the
 			// hard copy of the file we just downloaded since we'll point
@@ -684,6 +693,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		return fmt.Errorf("saving item '%s' to database: %v", it.fileName, err)
 	}
 
+	Info.Printf("Committed item '%s' to disk and database", it.fileName)
 	return nil
 }
 

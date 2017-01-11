@@ -3,10 +3,16 @@ package photobak
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// Info is a log to write informational and
+// notice messages to.
+var Info = log.New(ioutil.Discard, "", 0)
 
 // Client is a type that can interfact with a media
 // storage service.

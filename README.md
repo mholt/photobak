@@ -95,11 +95,13 @@ Because Photobak's operations are idempotent, you should be able to just run the
 
 Only one Photobak instance may work on a repository at a time. If multiple invocations of photobak attempt to open the database at the same time, any other the first will get a timeout error.
 
+You can get informational log messages with the `-v` flag. This will output a lot of information to stdout; do not use this with unsupervised executions.
+
 ## Running Headless
 
-Photobak must be authorized to access your accounts before it can be of any use, and obtaining authorization for services that use OAuth require opening a browser tab for the user to grant access. This does not work so well headless.
+Photobak must be authorized to access your accounts before it can be of any use, and obtaining authorization for services that use OAuth requires opening a browser tab for the user to grant access. This does not work so well over SSH.
 
-You can run your photobak command with the `-authonly` flag, and it will obtain any needed credentials for all configured accounts and store them in the database. You can then copy the database to your remote machine and use its folder as the repository; the credentials in the repo's database that you already obtained will be used.
+On your local machine, run photobak with the `-authonly` flag, and it will obtain any needed credentials for all configured accounts and store them in the database. You can then copy the database to your remote machine and use its folder as the repository; the credentials in the repo's database that you already obtained will be used.
 
 ## Caveats
 

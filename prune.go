@@ -40,6 +40,7 @@ func (r *Repository) Prune() error {
 
 			if _, ok := state[collID]; !ok {
 				// collection does not exist remotely anymore; delete locally.
+				Info.Printf("Collection '%s' does not exist remotely anymore; deleting local copy", coll.DirName)
 				err := r.deleteCollection(ac.account, coll)
 				if err != nil {
 					log.Printf("[ERROR] %v", err)
@@ -58,6 +59,7 @@ func (r *Repository) Prune() error {
 					if err != nil {
 						return err
 					}
+					Info.Printf("Item '%s' does not exist in '%s' anymore; deleting local copy", item.FileName, coll.DirName)
 					err = r.deleteItemFromCollection(ac.account, item, coll)
 					if err != nil {
 						return err

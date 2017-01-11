@@ -23,6 +23,7 @@ var (
 	every          string
 	prune          bool
 	authOnly       bool
+	verbose        bool
 )
 
 func init() {
@@ -33,10 +34,15 @@ func init() {
 	flag.IntVar(&concurrency, "concurrency", concurrency, "How many downloads to do in parallel")
 	flag.BoolVar(&prune, "prune", prune, "Clean up removed photos and albums")
 	flag.BoolVar(&authOnly, "authonly", authOnly, "Obtain authorizations only; do not perform backups")
+	flag.BoolVar(&verbose, "v", verbose, "Write informational log messages to stdout")
 }
 
 func main() {
 	flag.Parse()
+
+	if verbose {
+		photobak.Info = log.New(os.Stdout, "", log.LstdFlags)
+	}
 
 	switch logFile {
 	case "stdout":
