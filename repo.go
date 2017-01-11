@@ -191,7 +191,11 @@ func (r *Repository) Store(saveEverything bool) error {
 
 	// perform downloads for each account
 	var collWg sync.WaitGroup
-	throttle := make(chan struct{}, r.NumWorkers)
+	numCollWorkers := r.NumWorkers / 2
+	if numCollWorkers < 1 {
+		numCollWorkers = 1
+	}
+	throttle := make(chan struct{}, numCollWorkers)
 	for _, ac := range accounts {
 		listedCollections, err := ac.client.ListCollections()
 		if err != nil {
@@ -209,12 +213,9 @@ func (r *Repository) Store(saveEverything bool) error {
 			}(listedColl)
 		}
 		for i := 0; i < cap(throttle); i++ {
-			throttle <- struct{}{} // make sure all goroutines have finished
+			throttle <- struct{}{} // make sure all goroutines finish
 		}
 	}
-
-	// block until all the workers are finished
-	workerWg.Wait()
 
 	// block until the processCollection() goroutines have finished
 	// wrapping all items; this is important because the context
@@ -224,6 +225,10 @@ func (r *Repository) Store(saveEverything bool) error {
 	collWg.Wait()
 
 	close(ctxChan)
+
+	// block until all the workers are finished
+	workerWg.Wait()
+
 	return nil
 }
 
@@ -321,7 +326,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 	// begin processing all the items for this collection
 	err = ac.client.ListCollectionItems(coll, itemChan)
 	if err != nil {
-		return fmt.Errorf("listing collection items: %v", err)
+		return fmt.Errorf("client error listing collection items, giving up: %v", err)
 	}
 
 	return nil
@@ -617,6 +622,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		log.Printf("[ERROR] downloading %s, attempt %d: %v; retrying", it.filePath, i+1, err)
 	}
 	if err != nil {
+		os.Remove(outFilePath) // no need for it, the download failed
 		return fmt.Errorf("repeatedly failed downloading %s: %v", it.filePath, err)
 	}
 
@@ -672,6 +678,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	if it.isNew {
 		sameItems, err := r.db.itemsWithChecksum(dbi.Checksum)
 		if err != nil {
+			os.Remove(outFilePath)
 			return fmt.Errorf("de-duplicating item '%s': %v", it.fileName, err)
 		}
 		if len(sameItems) > 0 {
@@ -681,6 +688,12 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			// save this item to this collection, but we'll delete the
 			// hard copy of the file we just downloaded since we'll point
 			// to where it already exists in the repository.
+
+			// delete the physical copy we just downloaded
+			err = os.Remove(outFilePath)
+			if err != nil {
+				return err
+			}
 
 			// load any item that has this checksum, they should all point to the
 			// same file path; use it to set this item's file path.
@@ -695,12 +708,6 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			if err != nil {
 				return err
 			}
-
-			// delete the physical copy we just downloaded
-			err = os.Remove(outFilePath)
-			if err != nil {
-				return err
-			}
 		}
 	}
 
@@ -708,6 +715,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	// now commit this item to the database!
 	err = r.db.saveItem(pa.key(), itemID, dbi)
 	if err != nil {
+		os.Remove(outFilePath) // no record of it in the database, so don't keep it on disk...
 		return fmt.Errorf("saving item '%s' to database: %v", it.fileName, err)
 	}
 

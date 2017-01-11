@@ -118,18 +118,16 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 func (c *Client) ListCollectionItems(col photobak.Collection, itemChan chan photobak.Item) (err error) {
 	defer close(itemChan)
 	url := "https://picasaweb.google.com/data/feed/api/user/default/albumid/" + col.CollectionID()
+
 	// try a few times in case there's a network error
 	for i := 0; i < 3; i++ {
 		err = c.listAllPhotos(url, itemChan)
-		if err != nil {
-			log.Printf("listing collection items (attempt %d): %v", i+1, err)
-			continue
+		if err == nil {
+			break
 		}
-		break
+		log.Printf("listing collection items (attempt %d): %v", i+1, err)
 	}
-	if err != nil {
-		log.Printf("listing collection items: %v; giving up", err)
-	}
+
 	return
 }
 

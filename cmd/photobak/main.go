@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"time"
 
@@ -131,19 +132,35 @@ func parseEvery(every string) (time.Duration, error) {
 }
 
 func run() error {
+	waitchan := make(chan struct{})
+
 	repo, err := photobak.OpenRepo(repoDir)
 	if err != nil {
 		return fmt.Errorf("opening repo: %v", err)
 	}
-	defer repo.Close()
+	defer close(waitchan)
 
-	// TODO: Close the repo cleanly if SIGINT is received
+	// cleanly close repository when interrupted
+	// or when the function ends
+	go func() {
+		sigchan := make(chan os.Signal, 1)
+		signal.Notify(sigchan, os.Interrupt)
+		select {
+		case <-waitchan:
+			repo.Close()
+		case <-sigchan:
+			log.Println("[INTERRUPT] Closing database and quitting")
+			repo.Close()
+			os.Exit(0)
+		}
+	}()
 
 	repo.NumWorkers = concurrency
 
 	if prune {
 		return repo.Prune()
 	}
+
 	return repo.Store(keepEverything)
 }
 
