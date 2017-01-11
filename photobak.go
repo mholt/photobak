@@ -110,51 +110,51 @@ type itemContext struct {
 	saveEverything bool
 }
 
-// DBCollection represents a collection (album,
+// dbCollection represents a collection (album,
 // bucket, or stream) of photos/videos stored in
 // the database.
-type DBCollection struct {
+type dbCollection struct {
 	ID      string    // unique ID
 	Name    string    // name of collection
 	DirName string    // the name of the directory representing this collection
 	DirPath string    // the repo-relative path to collection directory on disk
 	Saved   time.Time // when this collection was put into the DB (or updated)
-	Meta    CollectionMeta
+	Meta    collectionMeta
 	Items   map[string]struct{} // the IDs of items that are in this collection
 }
 
-// CollectionMeta is extra information
+// collectionMeta is extra information
 // about a collection.
-type CollectionMeta struct {
+type collectionMeta struct {
 	API Collection // everything given by remote/API; only stored if requested
 }
 
-// DBItem represents an item stored in the database.
-type DBItem struct {
+// dbItem represents an item stored in the database.
+type dbItem struct {
 	ID          string              // unique ID for this item (should be same across all collections)
 	Name        string              // name as given by the API, usually the file name
 	FileName    string              // same as Name, unless there is another file with the same name in its folder
 	FilePath    string              // repo-relative path to the file on disk
-	Hash        []byte              // sha256 of the contents
+	Checksum    []byte              // sha256 of the contents that we make while downloading it
+	ETag        string              // ETag, like a hash but given by the API so we can know if it changed remotely
 	Saved       time.Time           // when this item was put into the DB (or updated)
 	Collections map[string]struct{} // the IDs of the collections this photo appears in
-	Caption     string              // the summary/caption/description of the item, if not stored in Meta.
-	Meta        ItemMeta            // extra info
+	Meta        itemMeta            // extra info that we don't rely on to function correctly
 }
 
-// ItemMeta holds extra information about an item.
+// itemMeta holds extra information about an item.
 // Fields on this struct might not be set.
-type ItemMeta struct {
+type itemMeta struct {
 	API     Item     // everything given by remote/API; only stored if requested
-	Setting *Setting // obtained directly from embedded EXIF
-	Caption string   // the caption, summary, or description of the item
+	Setting *setting // obtained directly from embedded EXIF
+	Caption string   // the caption/summary/description of the item
 }
 
-// Setting is a place and time. This information
+// setting is a place and time. This information
 // might be extracted from EXIF data contained in the
 // actual file if it is not available in the API
 // response.
-type Setting struct {
+type setting struct {
 	// Coordinates where the media originated.
 	Latitude    float64
 	Longitude   float64

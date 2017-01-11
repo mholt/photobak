@@ -39,7 +39,7 @@ func (r *Repository) replaceInMediaListFile(dirPath, oldPath, newPath string) er
 	inFile, err := os.Open(permFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // no media list file, no problem.
+			return nil // no media list file, no problem, nothing to do.
 		}
 		return err
 	}
@@ -85,7 +85,7 @@ func (r *Repository) replaceInMediaListFile(dirPath, oldPath, newPath string) er
 	return nil
 }
 
-func (r *Repository) mediaListHasItem(collDirPath string, dbi *DBItem) (bool, error) {
+func (r *Repository) mediaListHasItem(collDirPath string, dbi *dbItem) (bool, error) {
 	file, err := os.Open(r.fullPath(r.mediaListPath(collDirPath)))
 	if err != nil {
 		if os.IsNotExist(err) {

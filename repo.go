@@ -3,7 +3,9 @@ package photobak
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"os"
@@ -44,6 +46,14 @@ type Repository struct {
 	itemNames   map[string]chan struct{}
 	itemNamesMu sync.Mutex
 
+	// a set of item checksums to channel used for waiting;
+	// if two different goroutines download the same content
+	// concurrently (because for some reason they have
+	// different IDs, happens on Google Photos), this map will
+	// ensure that only one checksum is processed at a time.
+	itemChecksums   map[string]chan struct{}
+	itemChecksumsMu sync.Mutex
+
 	// NumWorkers is how many download workers to operate
 	// in parallel.
 	NumWorkers int
@@ -75,10 +85,11 @@ func OpenRepo(path string) (*Repository, error) {
 	}
 
 	return &Repository{
-		path:        path,
-		db:          db,
-		downloading: make(map[string]string),
-		itemNames:   make(map[string]chan struct{}),
+		path:          path,
+		db:            db,
+		downloading:   make(map[string]string),
+		itemNames:     make(map[string]chan struct{}),
+		itemChecksums: make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -223,7 +234,7 @@ func (r *Repository) authorizedAccounts() ([]accountClient, error) {
 // processCollection will process a collection from a provider.
 func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext, saveEverything bool) error {
 	// see if we have the collection in the db already
-	dbc, err := r.db.loadCollection(ac.account, listedColl.CollectionID())
+	dbc, err := r.db.loadCollection(ac.account.key(), listedColl.CollectionID())
 	if err != nil {
 		return err
 	}
@@ -247,7 +258,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 
 	// save collection to database
 	if dbc == nil {
-		dbc = &DBCollection{
+		dbc = &dbCollection{
 			ID:      coll.CollectionID(),
 			Name:    coll.CollectionName(),
 			DirName: coll.dirName,
@@ -259,7 +270,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 	if saveEverything {
 		dbc.Meta.API = coll.Collection
 	}
-	err = r.db.saveCollection(ac.account, dbc.ID, dbc)
+	err = r.db.saveCollection(ac.account.key(), dbc.ID, dbc)
 	if err != nil {
 		if dbc == nil {
 			// this was a new collection, couldn't save it to DB,
@@ -296,17 +307,19 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 	// block until our goroutine has finished reading items; this
 	// is important because the context channel is closed once
 	// all of these functions have stopped
+	// TODO: It would be nice if the workers didn't all have to be
+	// working on the same collection at a time.
 	wg.Wait()
 
 	return nil
 }
 
 // processItem will process an item from a provider.
-func (r *Repository) processItem(ctx itemContext) error { //(receivedItem Item, coll collection, ac accountClient, saveEverything bool) error {
+func (r *Repository) processItem(ctx itemContext) error {
 	itemID := ctx.item.ItemID()
 
 	// check if we already have it
-	loadedItem, err := r.db.loadItem(ctx.ac.account, itemID)
+	loadedItem, err := r.db.loadItem(ctx.ac.account.key(), itemID)
 	if err != nil {
 		return fmt.Errorf("loading item '%s' from database: %v", itemID, err)
 	}
@@ -330,22 +343,17 @@ func (r *Repository) processItem(ctx itemContext) error { //(receivedItem Item, 
 	} else {
 		// we already have this item in the DB
 
-		// check ETag
-		// TODO: This will be different for the same photo if it is in a different album :(
-		// ALSO i've seen the same eTag for different photos in the same album :( :( :(
-		// if loadedItem.Meta.API.ItemETag() != item.ItemETag() {
-		// 	fmt.Println("ETag is different")
-		// 	// TODO: re-download it to the path it is already at on disk
-		// 	// and update the metadata in the database.
-		// }
-
 		// if we don't have it on disk as a file or in the media list file for
 		// this collection already, add path to text file in this collection.
-		has, err := r.localCollectionHasItemOnDisk(ctx.ac.account, ctx.coll, loadedItem)
+		folderHas, err := r.localCollectionHasItemOnDisk(ctx.ac.account, ctx.coll, loadedItem)
 		if err != nil {
 			return fmt.Errorf("checking if local collection has item: %v", err)
 		}
-		if !has {
+		_, dbHas := loadedItem.Collections[ctx.coll.CollectionID()]
+		if !folderHas && !dbHas {
+			// okay, the fact that this item belongs to this collection is
+			// new information. add it to the media list file and save it
+			// to the collection in the DB.
 			err := r.writeToMediaListFile(ctx.coll, loadedItem.FilePath)
 			if err != nil {
 				return fmt.Errorf("writing to media list file: %v", err)
@@ -354,23 +362,30 @@ func (r *Repository) processItem(ctx itemContext) error { //(receivedItem Item, 
 			if err != nil {
 				return fmt.Errorf("saving item to collection in DB: %v", err)
 			}
+			return nil
 		}
 
+		// compare checksums; if different, file was corrupted or deleted.
+		// also check etag to see if modified remotely after it was downloaded.
 		chksm, err := r.hash(loadedItem.FilePath)
-		if err != nil || !bytes.Equal(chksm, loadedItem.Hash) {
-			// re-download, file was corrupted/changed (or missing, etc...)
+		corrupted := err != nil || !bytes.Equal(chksm, loadedItem.Checksum)
+		modifiedRemotely := loadedItem.ETag != ctx.item.ItemETag()
+
+		if corrupted || modifiedRemotely {
 			if err != nil {
-				return fmt.Errorf("hashing file: %v", err)
+				log.Printf("[ERROR] checking file integrity: %v", err)
 			}
-			log.Printf("[ERROR] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
+			if corrupted {
+				log.Printf("[ERROR] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
+			}
 
 			it := item{
 				Item:        ctx.item,
 				fileName:    loadedItem.FileName,
 				filePath:    loadedItem.FilePath,
 				collections: loadedItem.Collections,
+				// being very careful to NOT set isNew to true ;) - this is an existing item!
 			}
-
 			err := r.downloadAndSaveItem(ctx.ac.client, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
 			if err != nil {
 				return fmt.Errorf("re-downloading and saving existing item: %v", err)
@@ -415,6 +430,10 @@ func (r *Repository) reserveUniqueFilename(dir, targetName string, isDir bool) (
 			break
 		}
 		parts := strings.SplitN(targetName, ".", 2)
+		if len(parts) == 1 { // no file extension (likely a directory)
+			candidate = targetName + fmt.Sprintf("-%03d", i)
+			continue
+		}
 		candidate = strings.Join(parts, fmt.Sprintf("-%03d.", i))
 	}
 
@@ -476,6 +495,14 @@ func (w dishonestWriter) Write(p []byte) (int, error) {
 }
 
 func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection, pa providerAccount, saveEverything bool) error {
+	saveToMediaListFile := func(pa providerAccount, coll collection, pointedPath, itemID string) error {
+		err := r.writeToMediaListFile(coll, pointedPath)
+		if err != nil {
+			return err
+		}
+		return r.db.saveItemToCollection(pa, itemID, coll.CollectionID())
+	}
+
 	itemID := it.ItemID()
 	mapKey := pa.provider.Name + ":" + itemID
 	it.collections[coll.CollectionID()] = struct{}{}
@@ -492,11 +519,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			// file in this coll so the owner can find
 			// it later if they want to, and we don't
 			// duplicate the file on disk.
-			err := r.writeToMediaListFile(coll, dlPath)
-			if err != nil {
-				return err
-			}
-			return r.db.saveItemToCollection(pa, itemID, coll.CollectionID())
+			return saveToMediaListFile(pa, coll, dlPath, itemID)
 		}
 
 		return nil
@@ -525,48 +548,57 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		it.filePath = r.repoRelative(filepath.Join(coll.dirPath, itemFileName))
 	}
 
-	outFile, err := os.Create(r.fullPath(it.filePath))
-	if err != nil {
-		return fmt.Errorf("opening output file %s: %v", it.filePath, err)
-	}
-	defer outFile.Close()
+	outFilePath := r.fullPath(it.filePath)
 
-	h := sha256.New()
-	pr, pw := io.Pipe()
-	mw := io.MultiWriter(outFile, h, dishonestWriter{pw})
-
+	// try a few times in case of network trouble
+	var h hash.Hash
 	var x *exif.Exif
-	go func() {
-		// an item may not have EXIF data, and that is not
-		// an error, it just means we don't have any meta
-		// data from the file. if it does have EXIF data
-		// and we have trouble reading it for some reason,
-		// it doesn't really matter because there's nothing
-		// we can do about it; so we ignore the error.
-		x, _ = exif.Decode(pr)
+	for i := 0; i < 3; i++ {
+		outFile, err := os.Create(outFilePath)
+		if err != nil {
+			return fmt.Errorf("opening output file %s: %v", it.filePath, err)
+		}
 
-		// the exif.Decode() call above only reads as much
-		// as needed to conclude the EXIF portion, then it
-		// stops reading. this is a problem, because it blocks
-		// all other writes in the MultiWriter from happening
-		// since this one is not reading. the DishonestWriter
-		// that we wrapped the write end of the pipe with will,
-		// as a special case, report a totally successful write
-		// if it gets a "write to closed pipe" error. so even
-		// though the whole file has likely not been read yet,
-		// it is not a bug to close the read end of this pipe.
-		pr.Close()
-	}()
+		h = sha256.New()
+		pr, pw := io.Pipe()
+		mw := io.MultiWriter(outFile, h, dishonestWriter{pw})
 
-	err = client.DownloadItemInto(it.Item, mw)
+		go func() {
+			// an item may not have EXIF data, and that is not
+			// an error, it just means we don't have any meta
+			// data from the file. if it does have EXIF data
+			// and we have trouble reading it for some reason,
+			// it doesn't really matter because there's nothing
+			// we can do about it; so we ignore the error.
+			x, _ = exif.Decode(pr)
+
+			// the exif.Decode() call above only reads as much
+			// as needed to conclude the EXIF portion, then it
+			// stops reading. this is a problem, because it blocks
+			// all other writes in the MultiWriter from happening
+			// since this one is not reading. the DishonestWriter
+			// that we wrapped the write end of the pipe with will,
+			// as a special case, report a totally successful write
+			// if it gets a "write to closed pipe" error. so even
+			// though the whole file has likely not been read yet,
+			// it is not a bug to close the read end of this pipe.
+			pr.Close()
+		}()
+
+		err = client.DownloadItemInto(it.Item, mw)
+		outFile.Close()
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("downloading %s: %v", it.ItemName(), err)
+		return fmt.Errorf("downloading %s: %v", it.filePath, err)
 	}
 
-	// I don't care about the error here. Might just not have EXIF data.
+	// I don't care about the error here. Not having EXIF data is OK.
 	setting, _ := r.getSettingFromEXIF(x)
 
-	meta := ItemMeta{Setting: setting, Caption: it.ItemCaption()}
+	meta := itemMeta{Setting: setting, Caption: it.ItemCaption()}
 	if saveEverything {
 		// NOTE: If the item caption is already stored as
 		// part of the Item, this will duplicate it in
@@ -574,23 +606,93 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		meta.API = it.Item
 	}
 
-	dbi := &DBItem{
+	dbi := &dbItem{
 		ID:          itemID,
 		Name:        it.ItemName(),
 		FileName:    it.fileName,
-		FilePath:    r.repoRelative(it.filePath),
+		FilePath:    it.filePath,
 		Meta:        meta,
 		Saved:       time.Now(),
 		Collections: it.collections,
-		Hash:        h.Sum(nil),
+		Checksum:    h.Sum(nil),
+		ETag:        it.ItemETag(),
 	}
 
-	err = r.db.saveItem(pa, itemID, dbi)
+	// de-duplicate at the content level: if we already have
+	// an item with this checksum in the repository, point
+	// to it instead of saving it again. the operations on
+	// the database are not within the same transaction,
+	// so we use a map with channels to synchronize.
+	hashStr := hex.EncodeToString(dbi.Checksum)
+	r.itemChecksumsMu.Lock()
+	ch, taken := r.itemChecksums[hashStr]
+	if taken {
+		// another goroutine is processing the same content
+		// (different item) right now; wait until it is done.
+		r.itemChecksumsMu.Unlock()
+		<-ch
+		r.itemChecksumsMu.Lock()
+	}
+	ch = make(chan struct{})
+	r.itemChecksums[hashStr] = ch
+	r.itemChecksumsMu.Unlock()
+	defer func() {
+		r.itemChecksumsMu.Lock()
+		delete(r.itemChecksums, hashStr)
+		close(ch)
+		r.itemChecksumsMu.Unlock()
+	}()
+
+	// if this item is new, see if its content is unique
+	if it.isNew {
+		sameItems, err := r.db.itemsWithChecksum(dbi.Checksum)
+		if err != nil {
+			return fmt.Errorf("de-duplicating item '%s': %v", it.fileName, err)
+		}
+		if len(sameItems) > 0 {
+			// this content is not unique; it exists elsewhere in the repo.
+			// save this item to this collection, but we'll delete the
+			// hard copy of the file we just downloaded since we'll point
+			// to where it already exists in the repository.
+
+			// load any item that has this checksum, they should all point to the
+			// same file path; use it to set this item's file path.
+			sameContent, err := r.db.loadItem(sameItems[0].AcctKey, sameItems[0].ItemID)
+			if err != nil {
+				return err
+			}
+			dbi.FilePath = sameContent.FilePath
+
+			// write that item's path to the media list file for this item
+			err = saveToMediaListFile(pa, coll, sameContent.FilePath, itemID)
+			if err != nil {
+				return err
+			}
+
+			// delete the physical copy we just downloaded
+			err = os.Remove(outFilePath)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// we've got everything on disk that we need,
+	// now commit this item to the database!
+	err = r.db.saveItem(pa.key(), itemID, dbi)
 	if err != nil {
 		return fmt.Errorf("saving item '%s' to database: %v", it.fileName, err)
 	}
 
 	return nil
+}
+
+// accountItem is used to identify an item across
+// any account in the repository; used for checksums
+// and repository-wide de-duplication.
+type accountItem struct {
+	AcctKey []byte
+	ItemID  string
 }
 
 // repoRelative turns a full path into a path that
@@ -614,7 +716,7 @@ func (r *Repository) fullPath(repoRelative string) string {
 
 // getSettingFromEXIF extracts coordinate, timestamp, and
 // altitude information from x.
-func (r *Repository) getSettingFromEXIF(x *exif.Exif) (*Setting, error) {
+func (r *Repository) getSettingFromEXIF(x *exif.Exif) (*setting, error) {
 	if x == nil {
 		return nil, nil
 	}
@@ -657,7 +759,7 @@ func (r *Repository) getSettingFromEXIF(x *exif.Exif) (*Setting, error) {
 		altFlt *= -1.0
 	}
 
-	return &Setting{
+	return &setting{
 		Latitude:   lat,
 		Longitude:  lon,
 		OriginTime: ts,
@@ -668,7 +770,7 @@ func (r *Repository) getSettingFromEXIF(x *exif.Exif) (*Setting, error) {
 // localCollectionHasItemOnDisk returns true if the given collection
 // has the item in it, either as an actual file or a reference
 // in the media list file.
-func (r *Repository) localCollectionHasItemOnDisk(pa providerAccount, coll collection, localItem *DBItem) (bool, error) {
+func (r *Repository) localCollectionHasItemOnDisk(pa providerAccount, coll collection, localItem *dbItem) (bool, error) {
 	// check for item on disk first
 	if r.fileExists(filepath.Join(coll.dirPath, localItem.FileName)) {
 		return true, nil

@@ -6,9 +6,10 @@ Photobak is a media archiver. It downloads your photos and videos from cloud ser
 Features:
 
 - Integrity checks
-- Doesn't store duplicates
+- De-duplication
 - Organizes photos on disk by album
 - Fast downloads in parallel
+- Updates photos if changes are detected
 - Can run on a schedule
 - Supports multiple accounts per service
 - Idempotent operations
@@ -18,7 +19,7 @@ Supported cloud services:
 
 - Google Photos
 
-More providers can be [added by implementing some interfaces](https://github.com/mholt/photobak/wiki/Writing-a-Client-Implementation). (Please submit a pull request if you've implemented one!)
+More providers can be easily added by [implementing some interfaces](https://github.com/mholt/photobak/wiki/Writing-a-Client-Implementation). (Please submit a pull request if you've implemented one!)
 
 Be sure to read the caveats below for your cloud services of choice.
 
@@ -48,7 +49,7 @@ $ export GOOGLEPHOTOS_CLIENT_SECRET=...
 $ photobak -googlephotos you@yours.com
 ```
 
-The first time using this account, you will be redirected to a web page where you'll authorize photobak to access your photos. Subsequent runs use the previously-stored credentials, so you won't be prompted again. However, you must continue to make your API key available in environment variables.
+The first time using this account, you will be redirected to a web page where you'll authorize photobak to access your photos. Subsequent runs use the previously-stored credentials, so you won't be prompted again. However, you must continue to make your client ID and secret available in environment variables.
 
 To specify more accounts, just rinse and repeat:
 
@@ -60,21 +61,21 @@ Photobak stores all content in a repository. The default repository is "./photos
 
 A photo or video may appear in more than one album. This is fine, but Photobak will not store more than one copy of a photo or video. Instead, it will write the path to where the file can be found out to a file in the album called "others.txt". You can follow those paths to find the rest of the photos for an album.
 
-After a full backup has completed, future backups will be much quicker. Because of this, you can run Photobak as often as you like (I usually do once per day, see below for running on a schedule).
+After a full backup has completed, future backups will be much quicker. Because of this, you can run Photobak as often as you like (I usually do once per day, see below for running on a schedule). Remote items will be checked for changes each time you run a backup. If the service's API reports any changes to a photo from when you downloaded it, Photobak will update the item on disk.
 
 By default, photobak only stores what it needs to do its archiving functions. You can tell it to store everything the cloud service returns with the `-everything` flag, but be aware it will increase the size of the index. For Google Photos, this extra information is things like links to thumbnails of various sizes, whether comments are enabled, license details, etc. You do not need to use this flag to store photo captions, names, or GPS coordinates from EXIF, because Photobak extracts and saves those regardless (they are considered valuable metadata).
 
 Repositories are portable. You can move them around, back them up, etc, so long as you do not disturb the structure or contents within a repository.
 
-Photobak never mutates remote storage. It is read-only on the cloud service.
+Photobak never mutates your cloud storage. It is read-only for the online service.
 
 ## Additive vs. Destructive
 
 By default, Photobak runs backup operations: it only adds to the local index. Photobak will not delete photos or albums once they have been downloaded.
 
-However, you can use the `-prune` flag to delete items locally that no longer appear in your cloud service. With this flag, Photobak will perform a regular backup operation, then delete local items that have disappeared remotely. This way, you can keep disk space under control.
+However, you can use the `-prune` flag to delete items locally that no longer appear in your cloud service. With this flag, Photobak will NOT perform a regular backup operation. Instead, it will query the API and delete items locally that have disappeared remotely. This way, you can keep disk space under control.
 
-The `-prune` command is destructive, so make sure you trust that the API is healthy before you run it (or have a backup of your backup). I usually don't run `-prune` as often as I do regular backups.
+The `-prune` option is destructive, so make sure you trust that the API is healthy before you run it (or have a backup of your backup). I usually don't run `-prune` as often as I do regular backups.
 
 ## Run on a Schedule
 
@@ -110,14 +111,17 @@ This program is designed to work with various cloud providers in a generic way, 
 
 - Some users [have reported](https://code.google.com/p/gdata-issues/issues/detail?id=7004) that a [maximum of ~10,000 photos can be downloaded](https://github.com/camlistore/camlistore/issues/874) per album. It is still unclear why this is; even Google employees are hitting this. Google Photos puts all your "instant upload" (auto backup) photos into a single album called "Auto Backup". So if you take most of your photos on your phone and they get uploaded to Google Photos, you may hit this limit and there is no way to get photos older than the most recent 10k unless you put them into albums you create. This issue becomes irrelevant as you run backups regularly, assuming later you don't go way back and add really old photos to your cloud service that you don't already have locally.
 
+- Unbelievably, Google Photos does _not_ assign unique IDs to photos in your account. It assigns IDs to unique photos _in albums_, but this is "too" unique, since the same photo may appear in multiple albums. Here, we rely on Photobak's de-duplication features. After a duplicate file is downloaded, it will be replaced with an entry in a text file that points to where it can already be found on disk. We could use another ID I found in the exif tag supplied by the API: the exif ID. This ID is more correctly unique per-photo, except sometimes it is _not unique enough_. But I only saw overlap on an edit (from an external editing app/program) of the same photo, so if one was overwritten (which it was), I still had the picture, just one variant instead of two. This actually works better as far as saving bandwidth and disk space and I was torn for days trying to decide which to use. But for now we use Google Photos' ID field.
+
 - Media may be available in several formats and sizes for a single item. Photobak will try to get the largest .mp4 video file, if available. If not, it will get the largest video even if it is a .flv file. If there is no video available, it tries the highest-resolution _anything_ it can find.
 
 - Filenames for albums and photos are sanitized to remove special characters that sometimes appear but may not play nicely with the file system. For example, "5:5.jpg" becomes "55.jpg".
+
+- Items that are shared with you but are not in your library will not be downloaded unless you click the "Add to Library" button on those items in Google Photos.
 
 
 ## Motivation
 
 I have an Android phone, and I love using Google Photos. It's amazing: free, unlimited photo storage that is automatically indexed and organized and searchable. When I take a picture on my phone, it goes straight to the cloud, and then my phone frees up space. This is all automatic, and it's great.
 
-The problem is, what if I lose access to my Google account? I have no local copy of my memories. They skipped my computer and went straight to the cloud. This program is designed for users who are too busy to manually download all their photos on a regular basis but still want a local copy of them, just in case.
-
+But if I lose access to my Google account, I have no local copy of my memories. This program is designed for users who are too busy to manually download all their photos on a regular basis but still want a local copy of them, just in case.

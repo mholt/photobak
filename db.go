@@ -25,19 +25,19 @@ func openDB(file string) (*boltDB, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte("checksums"))
+		return err
+	})
 	return &boltDB{DB: db}, err
 }
 
 // createAccount creates pa in the database if it does not exist.
 func (db *boltDB) createAccount(pa providerAccount) error {
 	return db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(pa.key())
-		if bucket == nil {
-			var err error
-			bucket, err = tx.CreateBucket(pa.key())
-			if err != nil {
-				return fmt.Errorf("create bucket %s: %v", pa.key(), err)
-			}
+		bucket, err := tx.CreateBucketIfNotExists(pa.key())
+		if err != nil {
+			return fmt.Errorf("create bucket %s: %v", pa.key(), err)
 		}
 		for _, b := range bucketNames {
 			_, err := bucket.CreateBucketIfNotExists([]byte(b))
@@ -77,16 +77,16 @@ func (db *boltDB) saveCredentials(acct providerAccount, creds []byte) error {
 	})
 }
 
-func (db *boltDB) loadItem(acct providerAccount, itemID string) (*DBItem, error) {
-	var item *DBItem
+func (db *boltDB) loadItem(acctKey []byte, itemID string) (*dbItem, error) {
+	var item *dbItem
 	err := db.View(func(tx *bolt.Tx) error {
-		accountBucket := tx.Bucket(acct.key())
+		accountBucket := tx.Bucket(acctKey)
 		if accountBucket == nil {
-			return fmt.Errorf("account '%s' does not exist in DB", acct)
+			return fmt.Errorf("account '%s' does not exist in DB", acctKey)
 		}
 		items := accountBucket.Bucket([]byte("items"))
 		if items == nil {
-			return fmt.Errorf("account '%s' is missing 'items' bucket", acct)
+			return fmt.Errorf("account '%s' is missing 'items' bucket", acctKey)
 		}
 		return gobDecode(items.Get([]byte(itemID)), &item)
 	})
@@ -103,8 +103,55 @@ func (db *boltDB) deleteItem(acct providerAccount, itemID string) error {
 		if items == nil {
 			return fmt.Errorf("account '%s' is missing 'items' bucket", acct)
 		}
+		// delete from checksum index
+		var item *dbItem
+		err := gobDecode(items.Get([]byte(itemID)), &item)
+		if err != nil {
+			return fmt.Errorf("loading item to get its hash: %v", err)
+		}
+		err = db.removeItemFromChecksumIndex(tx, item, acct.key())
+		if err != nil {
+			return err
+		}
+		// finally, delete item from DB
 		return items.Delete([]byte(itemID))
 	})
+}
+
+// removeItemFromChecksumIndex removes item from the checksum
+// index; item must belong to the account given by acctKey.
+// It is meant for use by already-open DB transactions.
+func (db *boltDB) removeItemFromChecksumIndex(tx *bolt.Tx, item *dbItem, acctKey []byte) error {
+	checksums := tx.Bucket([]byte("checksums"))
+	if checksums == nil {
+		return fmt.Errorf("no checksums bucket")
+	}
+	var list []accountItem
+	err := gobDecode(checksums.Get(item.Checksum), &list)
+	if err != nil {
+		return fmt.Errorf("loading list of hashed items: %v", err)
+	}
+	for i, li := range list {
+		if bytes.Equal(li.AcctKey, acctKey) && li.ItemID == item.ID {
+			list = append(list[:i], list[i+1:]...)
+		}
+	}
+	if len(list) == 0 {
+		err := checksums.Delete(item.Checksum)
+		if err != nil {
+			return err
+		}
+	} else {
+		listEnc, err := gobEncode(list)
+		if err != nil {
+			return err
+		}
+		err = checksums.Put(item.Checksum, listEnc)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *boltDB) deleteCollection(acct providerAccount, collID string) error {
@@ -121,23 +168,30 @@ func (db *boltDB) deleteCollection(acct providerAccount, collID string) error {
 	})
 }
 
-func (db *boltDB) saveItem(pa providerAccount, id string, item *DBItem) error {
+func (db *boltDB) saveItem(acctKey []byte, itemID string, item *dbItem) error {
 	return db.Update(func(tx *bolt.Tx) error {
-		accountBucket := tx.Bucket(pa.key())
+		accountBucket := tx.Bucket(acctKey)
 		if accountBucket == nil {
-			return fmt.Errorf("account '%s' does not exist in DB", pa)
+			return fmt.Errorf("account '%s' does not exist in DB", acctKey)
 		}
 
-		// first save the item
+		// first, load the item so we have access to the previous checksum
 		items := accountBucket.Bucket([]byte("items"))
 		if items == nil {
-			return fmt.Errorf("account '%s' is missing 'items' bucket", pa)
+			return fmt.Errorf("account '%s' is missing 'items' bucket", acctKey)
 		}
+		var savedItem *dbItem
+		err := gobDecode(items.Get([]byte(itemID)), &savedItem)
+		if err != nil {
+			return fmt.Errorf("loading item %s: %v", itemID, err)
+		}
+
+		// then save this item
 		itemEnc, err := gobEncode(item)
 		if err != nil {
 			return err
 		}
-		err = items.Put([]byte(id), itemEnc)
+		err = items.Put([]byte(itemID), itemEnc)
 		if err != nil {
 			return err
 		}
@@ -145,15 +199,49 @@ func (db *boltDB) saveItem(pa providerAccount, id string, item *DBItem) error {
 		// then update the collections so they know they contain this item
 		collections := accountBucket.Bucket([]byte("collections"))
 		if collections == nil {
-			return fmt.Errorf("account '%s' is missing 'collections' bucket", pa)
+			return fmt.Errorf("account '%s' is missing 'collections' bucket", acctKey)
 		}
 		for collID := range item.Collections {
-			err = db.addItemToCollection(accountBucket, id, collID)
+			err = db.addItemToCollection(accountBucket, itemID, collID)
 			if err != nil {
 				return fmt.Errorf("saving item to collection in DB: %v", err)
 			}
 		}
 
+		// then update the checksums index so we know which items have this content
+		checksums := tx.Bucket([]byte("checksums"))
+		if checksums == nil {
+			return fmt.Errorf("no 'checksums' bucket")
+		}
+		// if checksum has changed, detach this item from index at old checksum
+		if savedItem != nil && !bytes.Equal(savedItem.Checksum, item.Checksum) {
+			err := db.removeItemFromChecksumIndex(tx, savedItem, acctKey)
+			if err != nil {
+				return err
+			}
+		}
+		// now add this item to its checksum's list
+		var list []accountItem
+		err = gobDecode(checksums.Get(item.Checksum), &list)
+		if err != nil {
+			return fmt.Errorf("getting list of items with same checksum: %v", err)
+		}
+		// only add this item to the list if it's not already there
+		var found bool
+		for _, li := range list {
+			if bytes.Equal(li.AcctKey, acctKey) && li.ItemID == itemID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			list = append(list, accountItem{AcctKey: acctKey, ItemID: itemID})
+			encList, err := gobEncode(list)
+			if err != nil {
+				return fmt.Errorf("encoding list of items with same checksum: %v", err)
+			}
+			return checksums.Put(item.Checksum, encList)
+		}
 		return nil
 	})
 }
@@ -174,7 +262,7 @@ func (db *boltDB) addItemToCollection(accountBucket *bolt.Bucket, itemID, collID
 	if items == nil {
 		return fmt.Errorf("missing 'items' bucket")
 	}
-	item := &DBItem{Collections: make(map[string]struct{})}
+	item := &dbItem{Collections: make(map[string]struct{})}
 	err := gobDecode(items.Get([]byte(itemID)), &item)
 	if err != nil {
 		return fmt.Errorf("decoding item: %v", err)
@@ -200,7 +288,7 @@ func (db *boltDB) addItemToCollection(accountBucket *bolt.Bucket, itemID, collID
 	}
 
 	// get the collection
-	coll := DBCollection{Items: make(map[string]struct{})}
+	coll := dbCollection{Items: make(map[string]struct{})}
 	err = gobDecode(collections.Get([]byte(collID)), &coll)
 	if err != nil {
 		return fmt.Errorf("decoding collection: %v", err)
@@ -241,31 +329,31 @@ func (db *boltDB) collectionIDs(pa providerAccount) ([]string, error) {
 	return list, err
 }
 
-func (db *boltDB) loadCollection(pa providerAccount, collID string) (*DBCollection, error) {
-	var coll *DBCollection
+func (db *boltDB) loadCollection(acctKey []byte, collID string) (*dbCollection, error) {
+	var coll *dbCollection
 	err := db.View(func(tx *bolt.Tx) error {
-		accountBucket := tx.Bucket(pa.key())
+		accountBucket := tx.Bucket(acctKey)
 		if accountBucket == nil {
-			return fmt.Errorf("account '%s' does not exist in DB", pa)
+			return fmt.Errorf("account '%s' does not exist in DB", acctKey)
 		}
 		collections := accountBucket.Bucket([]byte("collections"))
 		if collections == nil {
-			return fmt.Errorf("account '%s' is missing 'collections' bucket", pa)
+			return fmt.Errorf("account '%s' is missing 'collections' bucket", acctKey)
 		}
 		return gobDecode(collections.Get([]byte(collID)), &coll)
 	})
 	return coll, err
 }
 
-func (db *boltDB) saveCollection(pa providerAccount, id string, coll *DBCollection) error {
+func (db *boltDB) saveCollection(acctKey []byte, id string, coll *dbCollection) error {
 	return db.Update(func(tx *bolt.Tx) error {
-		accountBucket := tx.Bucket(pa.key())
+		accountBucket := tx.Bucket(acctKey)
 		if accountBucket == nil {
-			return fmt.Errorf("account '%s' does not exist in DB", pa)
+			return fmt.Errorf("account '%s' does not exist in DB", acctKey)
 		}
 		collections := accountBucket.Bucket([]byte("collections"))
 		if collections == nil {
-			return fmt.Errorf("account '%s' is missing 'collections' bucket", pa)
+			return fmt.Errorf("account '%s' is missing 'collections' bucket", acctKey)
 		}
 		collEnc, err := gobEncode(coll)
 		if err != nil {
@@ -275,11 +363,25 @@ func (db *boltDB) saveCollection(pa providerAccount, id string, coll *DBCollecti
 	})
 }
 
+func (db *boltDB) itemsWithChecksum(chksm []byte) ([]accountItem, error) {
+	var list []accountItem
+	err := db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("checksums"))
+		if bucket == nil {
+			return fmt.Errorf("checksums bucket does not exist in DB")
+		}
+		return gobDecode(bucket.Get(chksm), &list)
+	})
+	return list, err
+}
+
 // account key: provider:username (or email address)
 
 /*
 	ROOT
-	|-- googlephotos:Matthew.Holt@gmail.com
+	|-- checksums
+		|-- <sha> -> list of <accountKey>::<itemID>
+	|-- googlephotos:my@email.com
 		|-- credentials -> (token)
 		|-- collections
 			|-- (collection ID) -> (collection)

@@ -31,7 +31,7 @@ func init() {
 	flag.StringVar(&logFile, "log", logFile, "Write logs to a file, stdout, or stderr")
 	flag.StringVar(&every, "every", every, "How often to run this command, blocking indefinitely")
 	flag.IntVar(&concurrency, "concurrency", concurrency, "How many downloads to do in parallel")
-	flag.BoolVar(&prune, "prune", prune, "Download new items, then prune removed photos and albums")
+	flag.BoolVar(&prune, "prune", prune, "Clean up removed photos and albums")
 	flag.BoolVar(&authOnly, "authonly", authOnly, "Obtain authorizations only; do not perform backups")
 }
 
@@ -135,26 +135,17 @@ func run() error {
 
 	repo.NumWorkers = concurrency
 
-	err = repo.Store(keepEverything)
-	if err != nil {
-		return err
-	}
-
 	if prune {
-		err := repo.Prune()
-		if err != nil {
-			return err
-		}
+		return repo.Prune()
 	}
-
-	return nil
+	return repo.Store(keepEverything)
 }
 
 func authorize() error {
 	fmt.Println("[Authorization Mode]")
 	fmt.Println("No backups will be performed, but credentials will be obtained")
 	fmt.Println("and stored to the database in the repo. You may then use this")
-	fmt.Println("repository headless.\n")
+	fmt.Printf("repository headless.\n\n")
 
 	repo, err := photobak.OpenRepo(repoDir)
 	if err != nil {

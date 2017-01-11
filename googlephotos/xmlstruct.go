@@ -1,6 +1,9 @@
 package googlephotos
 
-import "time"
+import (
+	"path/filepath"
+	"time"
+)
 
 // Structures in this file shamelessly borrowed
 // from Tamás Gulácsi's excellent package:
@@ -64,24 +67,78 @@ func (e Entry) CollectionName() string { return e.Title }
 
 // ItemID returns the item ID. Unfortunately, Google's "id" field
 // is sometimes too unique: the same photo can have different IDs
-// if in different albums. So we get the unique ID from exif data
-// of the entry first, then fall back to the Google-given
-// ID+timestamp, then just the ID. It's the best we can do.
+// if in different albums. There is usually an ID in the exif
+// tags of the XML which is more accurate. However, in some cases,
+// I've seen that ID be the same for different versions (edits) of
+// the same photo. In other words, it is not unique enough.  If we
+// did use the exif ID, it would mean we potentially lose the edited
+// version of the photo, but even if we did, it wouldn't be much
+// loss since we still would have one version of the photo on disk.
+//
+// (In the case of an item with the same ID but different
+// name in a single album, the first file would be left in place
+// and the second one would not be written, but a media list file
+// would be created in that directory to the first file in that same
+// directory. Kinda weird but technically doing its job. This is
+// what I witnessed when using the EXIF ID and that's how I
+// detected the overlap.)
+//
+// Photobak will de-duplicate at the content level by inspecting
+// downloaded files byte-for-byte. So even if this item is
+// actually a duplicate, the image data won't be stored duplicated
+// as long as Google Photos gives the same content for this item.
+// However, I have seen cases where the same photo in Google
+// Photos has different IDs and different checksums. Indeed, the
+// image files had the same bytes until line 88443 of a hexdump,
+// after which they varied until the end (one was even slightly
+// shorter than the other, but they looked the same visually
+// and had the same dimensions). This was confirmed independently
+// of Photobak by using a browser, to ensure it's not a bug in
+// the downloader.
+//
+// Long story short, I'm fairly confident using the Google
+// Photos ID is sufficient to be unique without overwriting.
+// But there will be some duplication of the item in the DB
+// and maybe on disk too. If we ever want to go back to using
+// EXIF IDs, we can try it... but people will have to
+// re-download their whole collections unless we write some
+// sort of subcommand to convert their DB.
 func (e Entry) ItemID() string {
-	if e.Exif != nil && e.Exif.UID != "" {
-		return e.Exif.UID
-	}
-	if e.Timestamp != "" {
-		return e.ID + "-" + e.Timestamp
-	}
-	return e.ID // NOTE! Same photo may have different IDs... :(
+	// if e.Exif != nil && e.Exif.UID != "" {
+	// 	return e.Exif.UID
+	// }
+	return e.ID
 }
 
 // ItemName returns the item's name (file name).
-func (e Entry) ItemName() string { return e.Title }
+// It appends a file extension based on MIME type
+// if there isn't one already, because sometimes
+// Google Photos items don't come with file extensions. -_-
+func (e Entry) ItemName() string {
+	name := e.Title
+	ext := filepath.Ext(name)
+	if ext == "" {
+		switch e.Content.Type {
+		case "image/jpeg":
+			name += ".jpg"
+		case "image/png":
+			name += ".png"
+		case "video/mpeg4":
+			name += ".mp4"
+		case "image/gif":
+			name += ".gif"
+		}
+	}
+	return name
+}
 
 // ItemETag returns the item's ETag.
-func (e Entry) ItemETag() string { return e.ETag }
+//
+// NOTE: We could use the ETag field, but it seems
+// Timestamp, Updated, Edited, or ImageVersion also
+// work. All these were somewhat tested with
+// changes and I chose to use Updated as the ETag.
+func (e Entry) ItemETag() string { return e.Updated.String() }
 
 // ItemCaption returns the item's summary/description.
 func (e Entry) ItemCaption() string { return e.Summary }
