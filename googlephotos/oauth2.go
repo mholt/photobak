@@ -124,7 +124,7 @@ func getNewToken(conf *oauth2.Config) (*oauth2.Token, error) {
 			ch <- token
 
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, successBody)
+			fmt.Fprintln(w, successBody)
 		}))
 	}()
 
@@ -137,6 +137,7 @@ func getNewToken(conf *oauth2.Config) (*oauth2.Token, error) {
 
 	select {
 	case token := <-ch:
+		fmt.Println("[ OK ] Successfully authenticated. Performing backup (could take hours)...")
 		return token, nil
 	case err := <-errCh:
 		return nil, err
