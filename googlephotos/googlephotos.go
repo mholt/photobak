@@ -125,7 +125,7 @@ func (c *Client) ListCollectionItems(col photobak.Collection, itemChan chan phot
 		if err == nil {
 			break
 		}
-		log.Printf("listing collection items (attempt %d): %v", i+1, err)
+		log.Printf("[DEBUG] listing photos in album '%s' (attempt %d): %v", col.CollectionName(), i+1, err)
 	}
 
 	return
