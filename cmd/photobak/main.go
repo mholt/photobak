@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -47,7 +48,7 @@ type daemon struct {
 
 func startDaemon(interval time.Duration) {
 	d := daemon{signalChan: make(chan os.Signal, 1)}
-	signal.Notify(d.signalChan, os.Interrupt)
+	signal.Notify(d.signalChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-d.signalChan
