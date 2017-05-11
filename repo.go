@@ -36,8 +36,9 @@ type Repository struct {
 	db *boltDB
 
 	// a map of files that are currently being downloaded/updated.
-	// key is the item ID, value is the path it is being saved to.
-	downloading   map[string]string
+	// key is the item ID, value is a struct which describes
+	// current state of the downloading item.
+	downloading   map[string]*downloadingItem
 	downloadingMu sync.Mutex
 
 	// a map of item path to channel used for waiting; if two
@@ -57,6 +58,26 @@ type Repository struct {
 	// NumWorkers is how many download workers to operate
 	// in parallel.
 	NumWorkers int
+}
+
+type downloadingItem struct {
+	// a path to a file where the item is currently downloading.
+	// zero value means that the file either hasn't been created
+	// yet or that the item has successfully finished its downloading.
+	path   string
+	pathMu sync.Mutex
+
+	// a channel used for waiting for item downloading completion
+	// (either successful or not).
+	completed chan struct{}
+}
+
+// Removes the downloading file.
+func (i *downloadingItem) remove() {
+	if i.path != "" {
+		os.Remove(i.path)
+		i.path = ""
+	}
 }
 
 // OpenRepo opens a repository that is ready to store backups
@@ -87,7 +108,7 @@ func OpenRepo(path string) (*Repository, error) {
 	return &Repository{
 		path:          path,
 		db:            db,
-		downloading:   make(map[string]string),
+		downloading:   make(map[string]*downloadingItem),
 		itemNames:     make(map[string]chan struct{}),
 		itemChecksums: make(map[string]chan struct{}),
 	}, nil
@@ -96,6 +117,28 @@ func OpenRepo(path string) (*Repository, error) {
 // Close closes a repository cleanly.
 func (r *Repository) Close() error {
 	return r.db.Close()
+}
+
+// Unsafe version of Close() which is expected to be called in the
+// middle of backing up process right before of os.Exit() call and
+// intended to provide a shutdown with best effort cleanup of created
+// temporary files and keeping the database in consistent state.
+func (r *Repository) CloseUnsafeOnExit() {
+	// We're intentionally lock mutexes here without subsequent unlock
+	// to avoid a race in the middle of unlock and os.Exit().
+
+	r.downloadingMu.Lock()
+
+	for _, downloadingItem := range r.downloading {
+		downloadingItem.pathMu.Lock()
+
+		if downloadingItem.path != "" {
+			Info.Printf("Removing partially downloaded %s", r.repoRelative(downloadingItem.path))
+			os.Remove(downloadingItem.path)
+		}
+	}
+
+	r.Close()
 }
 
 // getCredentials loads credentials for the given account, or if there
@@ -341,6 +384,31 @@ func (r *Repository) processItem(ctx itemContext) error {
 	}()
 
 	itemID := ctx.item.ItemID()
+	mapKey := ctx.ac.account.provider.Name + ":" + itemID
+	downloadingItem := &downloadingItem{completed: make(chan struct{})}
+
+	for {
+		r.downloadingMu.Lock()
+
+		if otherDownloadingItem, ok := r.downloading[mapKey]; ok {
+			r.downloadingMu.Unlock()
+
+			// it's already being downloaded.
+			// waiting for completion of download process...
+			<-otherDownloadingItem.completed
+		} else {
+			// not being downloaded; claim it for us.
+			r.downloading[mapKey] = downloadingItem
+			r.downloadingMu.Unlock()
+			break
+		}
+	}
+	defer func() {
+		r.downloadingMu.Lock()
+		delete(r.downloading, mapKey)
+		r.downloadingMu.Unlock()
+		close(downloadingItem.completed)
+	}()
 
 	// check if we already have it
 	loadedItem, err := r.db.loadItem(ctx.ac.account.key(), itemID)
@@ -360,9 +428,11 @@ func (r *Repository) processItem(ctx itemContext) error {
 		}
 
 		Info.Printf("Getting new item %s: %s", it.ItemID(), it.ItemName())
-		err = r.downloadAndSaveItem(ctx.ac.client, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
+		err = r.downloadAndSaveItem(ctx.ac.client, downloadingItem, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
 		if err != nil {
-			os.Remove(r.fullPath(it.filePath))
+			downloadingItem.pathMu.Lock()
+			downloadingItem.remove()
+			downloadingItem.pathMu.Unlock()
 			return fmt.Errorf("downloading and saving new item: %v", err)
 		}
 	} else {
@@ -414,8 +484,11 @@ func (r *Repository) processItem(ctx itemContext) error {
 				collections: loadedItem.Collections,
 				// being very careful to NOT set isNew to true ;) - this is an existing item!
 			}
-			err := r.downloadAndSaveItem(ctx.ac.client, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
+			err := r.downloadAndSaveItem(ctx.ac.client, downloadingItem, it, ctx.coll, ctx.ac.account, ctx.saveEverything)
 			if err != nil {
+				downloadingItem.pathMu.Lock()
+				downloadingItem.remove()
+				downloadingItem.pathMu.Unlock()
 				return fmt.Errorf("re-downloading and saving existing item: %v", err)
 			}
 		}
@@ -522,7 +595,7 @@ func (w dishonestWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection, pa providerAccount, saveEverything bool) error {
+func (r *Repository) downloadAndSaveItem(client Client, downloadingItem *downloadingItem, it item, coll collection, pa providerAccount, saveEverything bool) error {
 	saveToMediaListFile := func(pa providerAccount, coll collection, pointedPath, itemID string) error {
 		err := r.writeToMediaListFile(coll, pointedPath)
 		if err != nil {
@@ -532,57 +605,34 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	}
 
 	itemID := it.ItemID()
-	mapKey := pa.provider.Name + ":" + itemID
 	it.collections[coll.CollectionID()] = struct{}{}
-
-	r.downloadingMu.Lock()
-	dlPath, ok := r.downloading[mapKey]
-	if ok {
-		r.downloadingMu.Unlock()
-		// it's already being downloaded...
-
-		if dlPath != it.filePath {
-			// ... but to a different collection. so we
-			// should write out that location to a text
-			// file in this coll so the owner can find
-			// it later if they want to, and we don't
-			// duplicate the file on disk.
-			return saveToMediaListFile(pa, coll, dlPath, itemID)
-		}
-
-		return nil
-	}
-
-	// not being downloaded; claim it for us.
-	r.downloading[mapKey] = it.filePath
-	r.downloadingMu.Unlock()
-	defer func(mapKey string) {
-		r.downloadingMu.Lock()
-		delete(r.downloading, mapKey)
-		r.downloadingMu.Unlock()
-	}(mapKey)
 
 	err := os.MkdirAll(r.fullPath(coll.dirPath), 0700)
 	if err != nil {
 		return fmt.Errorf("creating folder for collection '%s': %v", coll.CollectionName(), err)
 	}
 
+	downloadingItem.pathMu.Lock()
 	if it.isNew {
 		itemFileName, err := r.reserveUniqueFilename(coll.dirPath, it.ItemName(), false)
 		if err != nil {
+			downloadingItem.pathMu.Unlock()
 			return fmt.Errorf("reserving unique filename: %v", err)
 		}
 		it.fileName = itemFileName
 		it.filePath = r.repoRelative(filepath.Join(coll.dirPath, itemFileName))
 	}
-
-	outFilePath := r.fullPath(it.filePath)
+	downloadingItem.path = r.fullPath(it.filePath)
+	downloadingItem.pathMu.Unlock()
 
 	// try a few times in case of network trouble
 	var h hash.Hash
 	var x *exif.Exif
 	for i := 0; i < 3; i++ {
-		outFile, err := os.Create(outFilePath)
+		downloadingItem.pathMu.Lock()
+		outFile, err := os.Create(downloadingItem.path)
+		downloadingItem.pathMu.Unlock()
+
 		if err != nil {
 			return fmt.Errorf("opening output file %s: %v", it.filePath, err)
 		}
@@ -613,7 +663,7 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			pr.Close()
 		}()
 
-		Info.Printf("[attempt %d] Downloading %s into %s", i+1, it.ItemID(), outFilePath)
+		Info.Printf("[attempt %d] Downloading %s into %s", i+1, it.ItemID(), it.filePath)
 		err = client.DownloadItemInto(it.Item, mw)
 		outFile.Close()
 		if err == nil {
@@ -622,7 +672,6 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		log.Printf("[ERROR] downloading %s, attempt %d: %v; retrying", it.filePath, i+1, err)
 	}
 	if err != nil {
-		os.Remove(outFilePath) // no need for it, the download failed
 		return fmt.Errorf("repeatedly failed downloading %s: %v", it.filePath, err)
 	}
 
@@ -678,7 +727,6 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	if it.isNew {
 		sameItems, err := r.db.itemsWithChecksum(dbi.Checksum)
 		if err != nil {
-			os.Remove(outFilePath)
 			return fmt.Errorf("de-duplicating item '%s': %v", it.fileName, err)
 		}
 		if len(sameItems) > 0 {
@@ -690,10 +738,9 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 			// to where it already exists in the repository.
 
 			// delete the physical copy we just downloaded
-			err = os.Remove(outFilePath)
-			if err != nil {
-				return err
-			}
+			downloadingItem.pathMu.Lock()
+			downloadingItem.remove()
+			downloadingItem.pathMu.Unlock()
 
 			// load any item that has this checksum, they should all point to the
 			// same file path; use it to set this item's file path.
@@ -711,16 +758,20 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 		}
 	}
 
+	downloadingItem.pathMu.Lock()
+
 	// we've got everything on disk that we need,
 	// now commit this item to the database!
-	err = r.db.saveItem(pa.key(), itemID, dbi)
-	if err != nil {
-		os.Remove(outFilePath) // no record of it in the database, so don't keep it on disk...
+	if err := r.db.saveItem(pa.key(), itemID, dbi); err != nil {
+		downloadingItem.remove() // no record of it in the database, so don't keep it on disk...
+		downloadingItem.pathMu.Unlock()
 		return fmt.Errorf("saving item '%s' to database: %v", it.fileName, err)
+	} else {
+		downloadingItem.path = ""
+		downloadingItem.pathMu.Unlock()
+		Info.Printf("Committed item '%s' to disk and database", it.fileName)
+		return nil
 	}
-
-	Info.Printf("Committed item '%s' to disk and database", it.fileName)
-	return nil
 }
 
 // accountItem is used to identify an item across

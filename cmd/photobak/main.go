@@ -42,7 +42,7 @@ func init() {
 
 type daemon struct {
 	repo       *photobak.Repository
-	repoLock   sync.Mutex
+	repoMu     sync.Mutex
 	signalChan chan os.Signal
 }
 
@@ -82,9 +82,9 @@ func (d *daemon) run() error {
 		return fmt.Errorf("opening repo: %v", err)
 	}
 
-	d.repoLock.Lock()
+	d.repoMu.Lock()
 	d.repo = repo
-	d.repoLock.Unlock()
+	d.repoMu.Unlock()
 	defer d.close(false)
 
 	repo.NumWorkers = concurrency
@@ -97,11 +97,15 @@ func (d *daemon) run() error {
 }
 
 func (d *daemon) close(exit bool) {
-	d.repoLock.Lock()
-	defer d.repoLock.Unlock()
+	d.repoMu.Lock()
+	defer d.repoMu.Unlock()
 
 	if d.repo != nil {
-		d.repo.Close()
+		if exit {
+			d.repo.CloseUnsafeOnExit()
+		} else {
+			d.repo.Close()
+		}
 		d.repo = nil
 	}
 
