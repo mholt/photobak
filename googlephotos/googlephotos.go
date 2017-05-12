@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -90,17 +92,7 @@ func (c *Client) ListCollections() ([]photobak.Collection, error) {
 		albums[i] = results.Entries[i]
 	}
 
-	// move Auto Backup to the end, since I think generally
-	// users will want the physical files in the albums
-	// they've curated, rather than the default 'everything'
-	// album with thousands of items in it.
-	for i, album := range albums {
-		if album.CollectionName() == "Auto Backup" {
-			albums = append(albums[:i], albums[i+1:]...)
-			albums = append(albums, album)
-			break
-		}
-	}
+	sort.Stable(albumSorter(albums))
 
 	return albums, nil
 }
@@ -322,4 +314,36 @@ func sanitizeFilename(filename string) string {
 		"●", "-", // common with Google Hangouts albums
 	)
 	return r.Replace(filename)
+}
+
+// Sorts out all automatic albums to the end of the list, since I think generally
+// users will want the physical files in the albums they've curated, rather than
+// the default 'everything' album with thousands of items in it or automatically
+// generated albums for the specific date or service.
+type albumSorter []photobak.Collection
+
+func (a albumSorter) Len() int {
+	return len(a)
+}
+
+func (a albumSorter) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+
+func (a albumSorter) Less(i, j int) bool {
+	return prioritizeAlbum(a[i].CollectionName()) < prioritizeAlbum(a[j].CollectionName())
+}
+
+var automaticAlbumRe = regexp.MustCompile(`^(\d+|\d{4}-\d{2}-\d{2})$`)
+
+func prioritizeAlbum(name string) int {
+	if name == "Auto Backup" {
+		return 1
+	} else if strings.HasPrefix(name, "Hangout ") {
+		return 2
+	} else if automaticAlbumRe.MatchString(name) {
+		return 3
+	} else {
+		return 0
+	}
 }
