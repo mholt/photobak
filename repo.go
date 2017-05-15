@@ -655,23 +655,25 @@ func (r *Repository) downloadAndSaveItem(client Client, it item, coll collection
 	// the database are not within the same transaction,
 	// so we use a map with channels to synchronize.
 	hashStr := hex.EncodeToString(dbi.Checksum)
-	r.itemChecksumsMu.Lock()
-	ch, taken := r.itemChecksums[hashStr]
-	if taken {
-		// another goroutine is processing the same content
-		// (different item) right now; wait until it is done.
-		r.itemChecksumsMu.Unlock()
-		<-ch
+	hashChan := make(chan struct{})
+	for {
 		r.itemChecksumsMu.Lock()
+		if ch, taken := r.itemChecksums[hashStr]; taken {
+			// another goroutine is processing the same content
+			// (different item) right now; wait until it is done.
+			r.itemChecksumsMu.Unlock()
+			<-ch
+		} else {
+			r.itemChecksums[hashStr] = hashChan
+			r.itemChecksumsMu.Unlock()
+			break
+		}
 	}
-	ch = make(chan struct{})
-	r.itemChecksums[hashStr] = ch
-	r.itemChecksumsMu.Unlock()
 	defer func() {
 		r.itemChecksumsMu.Lock()
 		delete(r.itemChecksums, hashStr)
-		close(ch)
 		r.itemChecksumsMu.Unlock()
+		close(hashChan)
 	}()
 
 	// if this item is new, see if its content is unique
