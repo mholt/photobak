@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -47,6 +48,13 @@ type daemon struct {
 }
 
 func startDaemon(interval time.Duration) {
+	if runtime.GOOS != "windows" {
+		// The default behaviour on SIGPIPE is to silently terminate the program which breaks clean shutdown, so ignore
+		// it because every program should check write() return code instead of crashing if some file descriptor became
+		// unavailable for writing.
+		signal.Notify(make(chan os.Signal), syscall.SIGPIPE)
+	}
+
 	d := daemon{signalChan: make(chan os.Signal, 1)}
 	signal.Notify(d.signalChan, os.Interrupt, syscall.SIGTERM)
 
