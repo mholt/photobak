@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
+	"syscall"
 	"time"
 
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -36,6 +38,80 @@ func init() {
 	flag.BoolVar(&prune, "prune", prune, "Clean up removed photos and albums")
 	flag.BoolVar(&authOnly, "authonly", authOnly, "Obtain authorizations only; do not perform backups")
 	flag.BoolVar(&verbose, "v", verbose, "Write informational log messages to stdout")
+}
+
+type daemon struct {
+	repo       *photobak.Repository
+	repoMu     sync.Mutex
+	signalChan chan os.Signal
+}
+
+func startDaemon(interval time.Duration) {
+	d := daemon{signalChan: make(chan os.Signal, 1)}
+	signal.Notify(d.signalChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-d.signalChan
+		log.Println("[INTERRUPT] Closing database and quitting")
+		d.close(true)
+	}()
+
+	if err := d.run(); err != nil {
+		if interval == 0 {
+			log.Fatal(err)
+		} else {
+			log.Println(err)
+		}
+	}
+
+	if interval == 0 {
+		return
+	}
+
+	for range time.Tick(interval) {
+		log.Println("Running backup")
+		if err := d.run(); err != nil {
+			log.Println(err)
+		}
+	}
+}
+
+func (d *daemon) run() error {
+	repo, err := photobak.OpenRepo(repoDir)
+	if err != nil {
+		return fmt.Errorf("opening repo: %v", err)
+	}
+
+	d.repoMu.Lock()
+	d.repo = repo
+	d.repoMu.Unlock()
+	defer d.close(false)
+
+	repo.NumWorkers = concurrency
+
+	if prune {
+		return repo.Prune()
+	}
+
+	return repo.Store(keepEverything)
+}
+
+func (d *daemon) close(exit bool) {
+	d.repoMu.Lock()
+	defer d.repoMu.Unlock()
+
+	if d.repo != nil {
+		if exit {
+			d.repo.CloseUnsafeOnExit()
+		} else {
+			d.repo.Close()
+		}
+		d.repo = nil
+	}
+
+	if exit {
+		os.Exit(0)
+	}
 }
 
 func main() {
@@ -85,21 +161,7 @@ func main() {
 		}
 	}
 
-	err := run()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if every != "" {
-		c := time.Tick(itvl)
-		for range c {
-			log.Println("Running backup")
-			err := run()
-			if err != nil {
-				log.Println(err)
-			}
-		}
-	}
+	startDaemon(itvl)
 }
 
 func parseEvery(every string) (time.Duration, error) {
@@ -129,39 +191,6 @@ func parseEvery(every string) (time.Duration, error) {
 	}
 
 	return time.Duration(minutes) * time.Minute, nil
-}
-
-func run() error {
-	waitchan := make(chan struct{})
-
-	repo, err := photobak.OpenRepo(repoDir)
-	if err != nil {
-		return fmt.Errorf("opening repo: %v", err)
-	}
-	defer close(waitchan)
-
-	// cleanly close repository when interrupted
-	// or when the function ends
-	go func() {
-		sigchan := make(chan os.Signal, 1)
-		signal.Notify(sigchan, os.Interrupt)
-		select {
-		case <-waitchan:
-			repo.Close()
-		case <-sigchan:
-			log.Println("[INTERRUPT] Closing database and quitting")
-			repo.Close()
-			os.Exit(0)
-		}
-	}()
-
-	repo.NumWorkers = concurrency
-
-	if prune {
-		return repo.Prune()
-	}
-
-	return repo.Store(keepEverything)
 }
 
 func authorize() error {
