@@ -337,7 +337,7 @@ func (a albumSorter) Less(i, j int) bool {
 var automaticAlbumRe = regexp.MustCompile(`^(\d+|\d{4}-\d{2}-\d{2})$`)
 
 func prioritizeAlbum(name string) int {
-	if name == "Auto Backup" {
+	if name == "Auto Backup" || name == "Автозагрузка" {
 		return 1
 	} else if strings.HasPrefix(name, "Hangout ") {
 		return 2
