@@ -625,10 +625,12 @@ func (r *Repository) downloadAndSaveItem(client Client, downloadingItem *downloa
 	downloadingItem.path = r.fullPath(it.filePath)
 	downloadingItem.pathMu.Unlock()
 
-	// try a few times in case of network trouble
 	var h hash.Hash
 	var x *exif.Exif
-	for i := 0; i < 3; i++ {
+
+	attempt := 1
+
+	for {
 		downloadingItem.pathMu.Lock()
 		outFile, err := os.Create(downloadingItem.path)
 		downloadingItem.pathMu.Unlock()
@@ -663,16 +665,19 @@ func (r *Repository) downloadAndSaveItem(client Client, downloadingItem *downloa
 			pr.Close()
 		}()
 
-		Info.Printf("[attempt %d] Downloading %s into %s", i+1, it.ItemID(), it.filePath)
+		Info.Printf("[attempt %d] Downloading %s into %s", attempt, it.ItemID(), it.filePath)
 		err = client.DownloadItemInto(it.Item, mw)
 		outFile.Close()
 		if err == nil {
 			break
 		}
-		log.Printf("[ERROR] downloading %s, attempt %d: %v; retrying", it.filePath, i+1, err)
-	}
-	if err != nil {
-		return fmt.Errorf("repeatedly failed downloading %s: %v", it.filePath, err)
+
+		if attempt >= 3 {
+			return fmt.Errorf("repeatedly failed downloading %s: %v", it.filePath, err)
+		}
+
+		log.Printf("[ERROR] downloading %s, attempt %d: %v; retrying", it.filePath, attempt, err)
+		attempt++
 	}
 
 	// I don't care about the error here. Not having EXIF data is OK.
