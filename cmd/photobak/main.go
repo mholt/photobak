@@ -22,7 +22,7 @@ import (
 var (
 	repoDir        = "./photos_backup"
 	keepEverything = false
-	skipRepoChecks = false
+	checkIntegrity = false
 	logFile        = "stderr"
 	concurrency    = 5
 	every          string
@@ -34,7 +34,7 @@ var (
 func init() {
 	flag.StringVar(&repoDir, "repo", repoDir, "The directory in which to store the downloaded media")
 	flag.BoolVar(&keepEverything, "everything", keepEverything, "Whether to store all metadata returned by API for each item")
-	flag.BoolVar(&skipRepoChecks, "skiprepochecks", skipRepoChecks, "Don't check items that already exist in the database")
+	flag.BoolVar(&checkIntegrity, "integrity", checkIntegrity, "Enable integrity checks for items that already exist in the database")
 	flag.StringVar(&logFile, "log", logFile, "Write logs to a file, stdout, or stderr")
 	flag.StringVar(&every, "every", every, "How often to run this command, blocking indefinitely")
 	flag.IntVar(&concurrency, "concurrency", concurrency, "How many downloads to do in parallel")
@@ -103,7 +103,7 @@ func (d *daemon) run() error {
 		return repo.Prune()
 	}
 
-	return repo.Store(keepEverything, skipRepoChecks)
+	return repo.Store(keepEverything, checkIntegrity)
 }
 
 func (d *daemon) close(exit bool) {

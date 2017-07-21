@@ -187,8 +187,8 @@ func (r *Repository) AuthorizeAllAccounts() error {
 // images or the number of comments on album) is important to
 // you, set it to true.
 //
-// If skipRepoChecks is true, consistency of the items that
-// are already stored in the database won't be checked.
+// If checkIntegrity is true, consistency of the items that
+// are already stored in the database will be checked.
 //
 // Store operates per-collection (per-album), that is, it
 // iterates each collection and downloads all the items for
@@ -207,7 +207,7 @@ func (r *Repository) AuthorizeAllAccounts() error {
 // will not disappear locally by running this method. It
 // will, however, update existing items if they are outdated,
 // missing, or corrupted locally.
-func (r *Repository) Store(saveEverything bool, skipRepoChecks bool) error {
+func (r *Repository) Store(saveEverything bool, checkIntegrity bool) error {
 	accounts, err := r.authorizedAccounts()
 	if err != nil {
 		return err
@@ -251,7 +251,7 @@ func (r *Repository) Store(saveEverything bool, skipRepoChecks bool) error {
 			throttle <- struct{}{}
 			go func(listedColl Collection) {
 				defer func() { <-throttle }()
-				err := r.processCollection(listedColl, ac, ctxChan, saveEverything, skipRepoChecks, &collWg)
+				err := r.processCollection(listedColl, ac, ctxChan, saveEverything, checkIntegrity, &collWg)
 				if err != nil {
 					log.Printf("[ERROR] processing %s: %v", listedColl.CollectionName(), err)
 					return
@@ -302,7 +302,7 @@ func (r *Repository) authorizedAccounts() ([]accountClient, error) {
 
 // processCollection will process a collection from a provider.
 func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext,
-	saveEverything bool, skipRepoChecks bool, wg *sync.WaitGroup) error {
+	saveEverything bool, checkIntegrity bool, wg *sync.WaitGroup) error {
 	Info.Printf("Processing collection %s: %s", listedColl.CollectionID(), listedColl.CollectionName())
 
 	// see if we have the collection in the db already
@@ -366,7 +366,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 				coll:           coll,
 				ac:             ac,
 				saveEverything: saveEverything,
-				skipRepoChecks: skipRepoChecks,
+				checkIntegrity: checkIntegrity,
 			}
 		}
 	}(wg)
@@ -446,7 +446,7 @@ func (r *Repository) processItem(ctx itemContext) error {
 		_, dbHas := loadedItem.Collections[ctx.coll.CollectionID()]
 		corrupted := false
 
-		if !dbHas || !ctx.skipRepoChecks {
+		if !dbHas || ctx.checkIntegrity {
 			// if we don't have it on disk as a file or in the media list file for
 			// this collection already, add path to text file in this collection.
 			if folderHas, err := r.localCollectionHasItemOnDisk(ctx.ac.account, ctx.coll, loadedItem); err != nil {
@@ -466,7 +466,7 @@ func (r *Repository) processItem(ctx itemContext) error {
 			}
 		}
 
-		if !ctx.skipRepoChecks {
+		if ctx.checkIntegrity {
 			// compare checksums; if different, file was corrupted or deleted.
 
 			checksum, err := r.hash(loadedItem.FilePath)
