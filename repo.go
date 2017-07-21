@@ -187,6 +187,9 @@ func (r *Repository) AuthorizeAllAccounts() error {
 // images or the number of comments on album) is important to
 // you, set it to true.
 //
+// If checkIntegrity is true, consistency of the items that
+// are already stored in the database will be checked.
+//
 // Store operates per-collection (per-album), that is, it
 // iterates each collection and downloads all the items for
 // each collection, and organizes them by collection name
@@ -204,7 +207,7 @@ func (r *Repository) AuthorizeAllAccounts() error {
 // will not disappear locally by running this method. It
 // will, however, update existing items if they are outdated,
 // missing, or corrupted locally.
-func (r *Repository) Store(saveEverything bool) error {
+func (r *Repository) Store(saveEverything bool, checkIntegrity bool) error {
 	accounts, err := r.authorizedAccounts()
 	if err != nil {
 		return err
@@ -248,7 +251,7 @@ func (r *Repository) Store(saveEverything bool) error {
 			throttle <- struct{}{}
 			go func(listedColl Collection) {
 				defer func() { <-throttle }()
-				err := r.processCollection(listedColl, ac, ctxChan, saveEverything, &collWg)
+				err := r.processCollection(listedColl, ac, ctxChan, saveEverything, checkIntegrity, &collWg)
 				if err != nil {
 					log.Printf("[ERROR] processing %s: %v", listedColl.CollectionName(), err)
 					return
@@ -298,7 +301,8 @@ func (r *Repository) authorizedAccounts() ([]accountClient, error) {
 }
 
 // processCollection will process a collection from a provider.
-func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext, saveEverything bool, wg *sync.WaitGroup) error {
+func (r *Repository) processCollection(listedColl Collection, ac accountClient, ctxChan chan itemContext,
+	saveEverything bool, checkIntegrity bool, wg *sync.WaitGroup) error {
 	Info.Printf("Processing collection %s: %s", listedColl.CollectionID(), listedColl.CollectionName())
 
 	// see if we have the collection in the db already
@@ -362,6 +366,7 @@ func (r *Repository) processCollection(listedColl Collection, ac accountClient, 
 				coll:           coll,
 				ac:             ac,
 				saveEverything: saveEverything,
+				checkIntegrity: checkIntegrity,
 			}
 		}
 	}(wg)
@@ -438,38 +443,44 @@ func (r *Repository) processItem(ctx itemContext) error {
 	} else {
 		// we already have this item in the DB
 
-		// if we don't have it on disk as a file or in the media list file for
-		// this collection already, add path to text file in this collection.
-		folderHas, err := r.localCollectionHasItemOnDisk(ctx.ac.account, ctx.coll, loadedItem)
-		if err != nil {
-			return fmt.Errorf("checking if local collection has item: %v", err)
-		}
 		_, dbHas := loadedItem.Collections[ctx.coll.CollectionID()]
-		if !folderHas && !dbHas {
-			// okay, the fact that this item belongs to this collection is
-			// new information. add it to the media list file and save it
-			// to the collection in the DB.
-			err := r.writeToMediaListFile(ctx.coll, loadedItem.FilePath)
-			if err != nil {
-				return fmt.Errorf("writing to media list file: %v", err)
+		corrupted := false
+
+		if !dbHas || ctx.checkIntegrity {
+			// if we don't have it on disk as a file or in the media list file for
+			// this collection already, add path to text file in this collection.
+			if folderHas, err := r.localCollectionHasItemOnDisk(ctx.ac.account, ctx.coll, loadedItem); err != nil {
+				return fmt.Errorf("checking if local collection has item: %v", err)
+			} else if !folderHas {
+				if err := r.writeToMediaListFile(ctx.coll, loadedItem.FilePath); err != nil {
+					return fmt.Errorf("writing to media list file: %v", err)
+				}
 			}
-			err = r.db.saveItemToCollection(ctx.ac.account, itemID, ctx.coll.CollectionID())
-			if err != nil {
-				return fmt.Errorf("saving item to collection in DB: %v", err)
+
+			if !dbHas {
+				// the fact that this item belongs to this collection is new information.
+				// save it to the collection in the DB.
+				if err := r.db.saveItemToCollection(ctx.ac.account, itemID, ctx.coll.CollectionID()); err != nil {
+					return fmt.Errorf("saving item to collection in DB: %v", err)
+				}
 			}
-			return nil
 		}
 
-		// compare checksums; if different, file was corrupted or deleted.
-		// also check etag to see if modified remotely after it was downloaded.
-		chksm, err := r.hash(loadedItem.FilePath)
-		corrupted := err != nil || !bytes.Equal(chksm, loadedItem.Checksum)
-		modifiedRemotely := loadedItem.ETag != ctx.item.ItemETag()
+		if ctx.checkIntegrity {
+			// compare checksums; if different, file was corrupted or deleted.
 
-		if corrupted || modifiedRemotely {
+			checksum, err := r.hash(loadedItem.FilePath)
 			if err != nil {
 				log.Printf("[ERROR] checking file integrity: %v", err)
 			}
+
+			corrupted = err != nil || !bytes.Equal(checksum, loadedItem.Checksum)
+		}
+
+		// also check etag to see if modified remotely after it was downloaded.
+		modifiedRemotely := loadedItem.ETag != ctx.item.ItemETag()
+
+		if corrupted || modifiedRemotely {
 			if corrupted {
 				log.Printf("[ERROR] checksum mismatch, re-downloading: %s", loadedItem.FilePath)
 			}

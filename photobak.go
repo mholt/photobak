@@ -118,6 +118,7 @@ type itemContext struct {
 	coll           collection
 	ac             accountClient
 	saveEverything bool
+	checkIntegrity bool
 }
 
 // dbCollection represents a collection (album,
