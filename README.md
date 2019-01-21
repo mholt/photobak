@@ -3,6 +3,32 @@ Photobak
 
 Photobak is a media archiver. It downloads your photos and videos from cloud services like Google Photos so you have a local copy of your content. Run it on a regular basis to make sure you own all your memories.
 
+
+NOTICE: Photobak has been replaced by [Timeliner](https://github.com/mholt/timeliner).
+===============================================
+
+This project is no longer maintained. It's been a good and faithful tool. I have had peace of mind knowing I have a local copy of my photo library.
+
+With the [deprecation of the Picasa Web Albums API](https://developers.google.com/picasa-web/docs/3.0/deprecation), it was time to replace Photobak with its successor, [Timeliner](https://github.com/mholt/timeliner).
+
+Timeliner supports Google Photos and several other services. It uses the newer Google Photos API, and was mostly inspired by Photobak.
+
+Unfortunately, Timeliner has a completely different architecture and storage mechanism, so there is no smooth transition process from Photobak to Timeliner. You will have to start over with a new archive ("timeline") using Timeliner.
+
+Like Photobak, Timeliner organizes your photos and videos by folder. Unlike Photobak, Timeliner organizes the folders by date instead of album.
+
+Like Photobak, Timeliner can do integrity checks and download only changed files that already exist locally. Unlike Photobak, Timeliner uses the new Google Photos API, which doesn't inform whether a photo has changed; so the only way to get the changes is to do a full `-reprocess`.
+
+Like Photobak, Timeliner downloads photos and videos at their largest resolution/bitrate, including all available EXIF data. Unlike Photobak, Timeliner can't access location data because the Google Photos API strips it out.
+
+Timeliner can resume interrupted downloads where it left off -- something that Photobak was not capable of. The Google Photos API is much more reliable and better documented, so Timeliner is more efficient and capable overall.
+
+
+
+Original README content:
+========================
+
+
 Features:
 
 - Integrity checks
